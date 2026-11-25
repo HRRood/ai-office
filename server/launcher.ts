@@ -133,8 +133,13 @@ export class Launcher {
     const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', cfg.permissionMode];
     if (cfg.allowedTools.length) args.push('--allowedTools', cfg.allowedTools.join(','));
     if (resume) args.push('--resume', resume);
-    const proc = spawn(cfg.claudePath, args, {
+    // On Windows `claude` is a .cmd shim, which can only be started through the shell. The prompt
+    // never goes on the command line (it's written to stdin), and every argument is quoted.
+    const win = process.platform === 'win32';
+    const proc = spawn(win ? winQuote(cfg.claudePath) : cfg.claudePath, win ? args.map(winQuote) : args, {
       cwd,
+      shell: win,
+      windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
       // our own mailbox hook must not wait inside a headless run
       env: { ...process.env, CLAUDE_OFFICE_HEADLESS: '1' },
@@ -185,4 +190,10 @@ export class Launcher {
     proc.stdin?.end(prompt);
     console.log(`🤖 ${resume ? 'continuing' : 'starting'} background run in ${project}${resume ? ` (${resume.slice(0, 8)})` : ''}`);
   }
+}
+
+/** Quote one argument for cmd.exe (used only on Windows, where .cmd shims need a shell). */
+function winQuote(arg: string): string {
+  if (/^[\w.:/\\=-]+$/.test(arg)) return arg;
+  return `"${arg.replace(/(["%^])/g, '^$1')}"`;
 }

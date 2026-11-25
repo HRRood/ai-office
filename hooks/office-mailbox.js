@@ -32,10 +32,17 @@ const quit = () => process.exit(0);
  */
 function isHeadless() {
   if (process.env.CLAUDE_OFFICE_HEADLESS === '1') return true;
-  if (process.platform === 'win32') return false;
   try {
     const { execFileSync } = require('child_process');
-    const args = execFileSync('ps', ['-o', 'args=', '-p', String(process.ppid)], { encoding: 'utf8', timeout: 1000 });
+    const ppid = String(Number(process.ppid)); // digits only
+    const args =
+      process.platform === 'win32'
+        ? execFileSync(
+            'powershell',
+            ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${ppid}").CommandLine`],
+            { encoding: 'utf8', timeout: 5000, windowsHide: true },
+          )
+        : execFileSync('ps', ['-o', 'args=', '-p', ppid], { encoding: 'utf8', timeout: 1000 });
     return /(^|\s)(-p|--print)(\s|=|$)/.test(args);
   } catch {
     return false;

@@ -11,7 +11,7 @@ Claude Code ──hook (node)──▶ POST 127.0.0.1:4317/event ──▶ serve
 
 ## Quick start
 
-Requires Node 18+.
+Requires **Node 22.12 or newer** (Vite and the dev tooling need it) and Claude Code.
 
 ```bash
 npm install
@@ -29,6 +29,25 @@ No Claude Code handy? `npm run simulate` fires fake events:
 | `npm run simulate` | 3 fake sessions, loops until Ctrl+C (which ends them cleanly) |
 | `npm run simulate -- --once` | each session runs one task, then leaves |
 | `npm run simulate -- --sessions 5 --speed 2` | more sessions, twice as fast |
+
+## Installing on another computer
+
+You install Claude Office **once per computer**, not per project: the hooks go into your user-level
+Claude Code settings, so one install shows every session in every project on that machine.
+
+```bash
+git clone <your repo> claude-office && cd claude-office
+npm install
+cp office.projects.example.json office.projects.json   # list this machine's project folders
+npm run install-hooks
+npm run dev
+```
+
+- `office.projects.json` is personal (absolute paths) and ignored by git. Each machine has its own.
+- The hook paths are absolute: run `npm run install-hooks` again after moving or re-cloning the folder.
+- Nicknames, the Visitors toggle and "left the office" are stored in the browser, so they don't move with you.
+- Works on macOS, Linux and Windows. On Windows, `claude` is found as `claude.cmd`; set `claudePath` in
+  `office.projects.json` if it lives somewhere else.
 
 ## Scripts
 
