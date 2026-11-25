@@ -11,7 +11,7 @@ Claude Code ──hook (node)──▶ POST 127.0.0.1:4317/event ──▶ serve
 
 ## Quick start
 
-Requires **Node 22.12 or newer** (Vite and the dev tooling need it) and Claude Code.
+Requires **Node.js 22.12 or newer** (any current LTS works: 22, 24 or 26) and Claude Code. Check with `node -v`.
 
 ```bash
 npm install
@@ -21,6 +21,10 @@ npm run dev             # server on :4317 + web UI on http://127.0.0.1:5173
 
 Open http://127.0.0.1:5173 and use Claude Code in any project. New sessions pick up the hooks
 automatically.
+
+To start sessions from the office (via the Manager), also create your projects list:
+`cp office.projects.example.json office.projects.json` and fill in your folders. See
+[Starting new sessions from the Manager](#starting-new-sessions-from-the-manager).
 
 No Claude Code handy? `npm run simulate` fires fake events:
 
@@ -46,8 +50,8 @@ npm run dev
 - `office.projects.json` is personal (absolute paths) and ignored by git. Each machine has its own.
 - The hook paths are absolute: run `npm run install-hooks` again after moving or re-cloning the folder.
 - Nicknames, the Visitors toggle and "left the office" are stored in the browser, so they don't move with you.
-- Works on macOS, Linux and Windows. On Windows, `claude` is found as `claude.cmd`; set `claudePath` in
-  `office.projects.json` if it lives somewhere else.
+- Tested on macOS; Linux should work the same. Windows is supported in the code but untested: `claude`
+  is started as `claude.cmd`, so set `claudePath` in `office.projects.json` if it lives somewhere else.
 
 ## Scripts
 
@@ -95,13 +99,19 @@ sending prompts.
 `hooks/office-mailbox.js` is registered on `Stop` with `asyncRewake: true` and a one-hour timeout.
 After each finished turn it waits in the background, asking the server every 1.5 s whether you've
 sent this session a prompt. When one arrives it prints it to stderr and exits with code 2, and Claude
-Code wakes the session with it (even when it's idle at the prompt). In headless runs (`claude -p`) it exits immediately, so it never keeps them waiting. It stops quietly when the session
-starts a turn on its own, ends, or after 55 minutes. If the server is unreachable for about a minute, it
-also gives up. It never prints to stdout.
+Code wakes the session with it (even when it's idle at the prompt).
+
+- In headless runs (`claude -p`, including your own scripts) it exits immediately, so it never keeps
+  them waiting.
+- It stops quietly when the session starts a turn on its own, ends, or after 55 minutes, and gives up
+  if the server is unreachable for about a minute. It never prints to stdout.
+- A session that has been idle for more than about 55 minutes only picks up office prompts after its
+  next turn.
 
 Sending is protected. The server makes a random token at startup and gives it only to localhost
-pages over the origin-checked WebSocket. `POST /prompt` requires that token, and CORS is only granted to
-localhost origins. Prompts are kept in memory until they're delivered, and never written to disk.
+pages over the origin-checked WebSocket. Every action endpoint (`/prompt`, `/launch`, `/projects`,
+`/dismiss`) requires that token, and CORS is only granted to localhost origins. Prompts are kept in
+memory until they're delivered, and never written to disk.
 
 ## How the hooks are installed and removed
 
@@ -126,7 +136,8 @@ Events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostTo
 `PermissionRequest`, `Notification`, `SubagentStart`, `SubagentStop`, `Stop`, `StopFailure`, `SessionEnd`.
 
 `npm run uninstall-hooks` makes a backup, then removes every handler whose command or args reference
-`office-hook.js`, and drops event arrays left empty. Everything else stays as it was.
+`office-hook.js` or `office-mailbox.js`, and drops event arrays left empty. Everything else stays as
+it was.
 
 **If you move this folder**, run `npm run install-hooks` again (the hook path is absolute).
 
@@ -164,6 +175,10 @@ WebSocket connections from localhost pages. Other websites can't read your activ
 
 ## What you'll see
 
+The office is a weathered "used future" space station in 3/4 perspective: worn deck plating, ribbed
+bulkheads, amber console screens, blast-door frames, and viewports that now and then make a hyperspace
+jump. All characters are original designs.
+
 | Activity | Room |
 | --- | --- |
 | New prompt (`UserPromptSubmit`) | Manager's Office: the manager hands out the task |
@@ -190,8 +205,9 @@ WebSocket connections from localhost pages. Other websites can't read your activ
   (40 in the panel, full title on hover). Until a session has a title, its project folder is used.
   The shortening is `shorten()` in `shared/names.ts`.
 - **Statuses:** working, waiting (needs you), resting (turn finished), idle (no events for 2 min,
-  shown faded with "zZ"). Sessions are removed on `SessionEnd`, or after 15 min without events.
-  A pending permission prompt stays "waiting" however long it takes.
+  shown faded with "zZ"). Sessions are removed on `SessionEnd`, or after 15 min without events
+  (background sessions started by the Manager wait up to 60 min for your next prompt). A pending
+  permission prompt stays "waiting" however long it takes.
 - **Side panel:** a "needs you" alert, the crew list, details for the selected session (recent
   actions, helpers), and a live log of the last 50 events. The tab title shows `(n!)` while
   someone is waiting on you.
@@ -211,8 +227,9 @@ WebSocket connections from localhost pages. Other websites can't read your activ
   - to **leave the office**, walk onto the entrance airlock on the left of the Manager's Office and
     keep walking left. Click **🚪 Enter the office** to come back in. Your browser remembers that you
     left, so a reload keeps you outside.
-- **Camera:** scroll (or pinch) to zoom toward the cursor, drag to pan, or use the + / − / ⤢ buttons
-  in the corner. Keyboard: `+` `-` zoom, `0` whole office, arrow keys pan.
+- **Camera:** scroll (or pinch) to zoom toward the cursor (50%–600%), drag to pan, or use the
+  + / − / ⤢ buttons in the corner. Keyboard: `+` `-` zoom, `0` whole office. (Arrow keys walk your
+  captain; the camera follows.)
 - **Rooms:** click a room to highlight it and open its card: who's in it, what each person is
   doing, recent activity there, and which tools send people there. Double-click a room (or click
   its chip in the **Rooms** bar) to zoom to it.
@@ -282,14 +299,14 @@ The server restarts by itself under `npm run dev`. Reload the page after that.
 | --- | --- | --- | --- |
 | `.` | floor | `T` | table |
 | `#` | wall | `A` | comm dish |
-| `D` | door (walkable) | `R` | reception counter |
+| `D` | door (walkable) | `R` | manager's desk (the Manager sits behind the right end) |
 | `E` | entrance airlock | `P` | plant |
-| `V` | window (starfield) | `s` | sofa |
-| `B` | archive shelf | `W` | whiteboard |
-| `d` | desk + monitor | `K` | coffee machine |
-| `H` | hologram | `F` | fridge |
+| `V` | viewport (starfield) | `s` | sofa |
+| `B` | data-cartridge rack | `W` | whiteboard |
+| `d` | console desk (seats in front of it) | `K` | coffee machine |
+| `H` | holo-projector | `F` | fridge |
 | `J` | jukebox | `Q` | beer taps |
-| `S` | server rack | `M` | mail cubbies |
+| `S` | server rack | `M` | cargo crates |
 
 Rules:
 
@@ -318,14 +335,20 @@ it in your shell profile if you change it.
 ## Project layout
 
 ```
-hooks/office-hook.js        hook script (plain Node, CommonJS, zero deps)
-scripts/                    install / uninstall / simulate
-shared/rooms.config.ts      room mapping + bubble text (server + web)
-shared/types.ts             event + state types
-server/                     Express + ws; state.ts holds the session state machine
-web/src/map.json            office layout
-web/src/engine/             map loader, A* pathfinding, tile + sprite art, canvas renderer
-web/src/components/         canvas wrapper, side panel
+hooks/office-hook.js         activity hook (plain Node, CommonJS, zero deps)
+hooks/office-mailbox.js      Stop hook that delivers prompts you send from the office
+scripts/                     install / uninstall / simulate
+shared/rooms.config.ts       room mapping + bubble text (server + web)
+shared/names.ts              session naming + shortening
+shared/types.ts              event + state types
+server/state.ts              session state machine, mailbox
+server/launcher.ts           background sessions started by the Manager
+server/index.ts              Express + ws, endpoints and security checks
+office.projects.example.json template for your (git-ignored) office.projects.json
+web/src/map.json             office layout
+web/src/engine/              map, A* pathfinding, tile + sprite art, holidays, canvas renderer
+web/src/components/          canvas, side panel, talk + launch dialogs
+ideas.md                     feature ideas checklist (built + backlog)
 ```
 
 ## Troubleshooting
@@ -340,5 +363,14 @@ web/src/components/         canvas wrapper, side panel
   couple of seconds.
 - **Workers look frozen.** Browsers pause animation in background tabs. They catch up when the
   tab is visible again.
+- **The Manager says "No projects configured".** Create `office.projects.json` from the example and
+  list your folders (absolute paths).
+- **A prompt from the office doesn't arrive.** The session needs the mailbox hook (run
+  `npm run install-hooks` after updating) and must have finished a turn since then. Sessions idle for
+  more than about 55 minutes pick it up after their next turn.
 - **Inspect live state:** `curl http://127.0.0.1:4317/state`. In dev, the renderer is
   `window.__office` in the browser console.
+
+## Ideas & roadmap
+
+See [`ideas.md`](ideas.md): everything that's built (ticked) and a backlog of ideas to pick from.
