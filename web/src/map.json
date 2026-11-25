@@ -1,0 +1,155 @@
+{
+  "$comment": "Edit `tiles` to change the layout (one char per tile, all rows equal length). Room ids must match shared/rooms.config.ts. Legend lists every char; walkable chars can be walked on.",
+  "tileSize": 16,
+  "legend": {
+    ".": "floor",
+    "#": "wall",
+    "D": "door",
+    "E": "entrance",
+    "V": "window",
+    "B": "bookshelf",
+    "d": "desk",
+    "H": "hologram",
+    "S": "server rack",
+    "M": "mail shelf",
+    "T": "table",
+    "A": "comm dish",
+    "R": "counter",
+    "P": "plant",
+    "s": "sofa",
+    "W": "whiteboard",
+    "K": "coffee machine",
+    "F": "fridge",
+    "Q": "beer taps",
+    "J": "jukebox"
+  },
+  "walkable": [
+    ".",
+    "D",
+    "E"
+  ],
+  "entrance": [
+    0,
+    12
+  ],
+  "rooms": {
+    "library": {
+      "label": "Library",
+      "rect": [
+        0,
+        0,
+        11,
+        8
+      ]
+    },
+    "research": {
+      "label": "Research",
+      "rect": [
+        11,
+        0,
+        21,
+        8
+      ]
+    },
+    "serverRoom": {
+      "label": "Server Room",
+      "rect": [
+        21,
+        0,
+        32,
+        8
+      ]
+    },
+    "mailroom": {
+      "label": "Mailroom",
+      "rect": [
+        32,
+        0,
+        43,
+        8
+      ]
+    },
+    "reception": {
+      "label": "Manager's Office",
+      "rect": [
+        0,
+        8,
+        11,
+        17
+      ]
+    },
+    "openOffice": {
+      "label": "Open Office",
+      "rect": [
+        11,
+        8,
+        43,
+        17
+      ]
+    },
+    "lounge": {
+      "label": "Lounge",
+      "rect": [
+        0,
+        17,
+        11,
+        25
+      ]
+    },
+    "workshop": {
+      "label": "Dev Room",
+      "rect": [
+        11,
+        17,
+        25,
+        25
+      ]
+    },
+    "whiteboard": {
+      "label": "Whiteboard",
+      "rect": [
+        25,
+        17,
+        34,
+        25
+      ]
+    },
+    "meeting": {
+      "label": "Meeting Room",
+      "rect": [
+        34,
+        17,
+        43,
+        25
+      ]
+    }
+  },
+  "tiles": [
+    "############VVVVVVVVV#######################",
+    "#BBBBBBBBBB#.dd..dd..#SSSSSSSSSS#MMMMMMMMMM#",
+    "#..........#.........#..........#..........#",
+    "#..........#.........#..........#..........#",
+    "#.BBB..BBB.#.........#.SSS..SSS.#...TTTT...#",
+    "#..........#....H....#..........#..........#",
+    "#....TT....#.........#..........#.........A#",
+    "#P........P#........P#P.........#..........#",
+    "#####DD########DD#########DD#########DD#####",
+    "#P........P#P.............................P#",
+    "#...RRRRR..#...............................V",
+    "#..........#...ddd...ddd...ddd...ddd.......V",
+    "E..........D...............................V",
+    "E..........D...............................V",
+    "#..........#...ddd...ddd...ddd...ddd.......V",
+    "#..........#...............................V",
+    "#P......sss#..............................P#",
+    "#####DD##########DD##########DD#######DD####",
+    "#P.........#............P#P.......#........#",
+    "#.........K#.ddd..ddd....#........#........#",
+    "#J........F#.............#........#.TTTTT..#",
+    "#..TT.....Q#...........T.#........#.HHTHH..#",
+    "#..........#.ddd..ddd..T.#........#.TTTTT..#",
+    "#.ssss....P#.............#........#........#",
+    "#..........#P............#WWWWWWWW#.......P#",
+    "##VVVVVVVV##################################"
+  ]
+}

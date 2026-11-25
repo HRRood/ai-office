@@ -1,0 +1,11 @@
+{
+  "$comment": "Copy to office.projects.json. Background sessions run `claude -p` in these folders; they can't show permission prompts, so permissionMode/allowedTools decide what they may do on their own.",
+  "projects": [
+    { "name": "My web app", "path": "/absolute/path/to/my-web-app" },
+    { "name": "API", "path": "/absolute/path/to/api" }
+  ],
+  "permissionMode": "acceptEdits",
+  "allowedTools": ["Bash(npm test:*)", "Bash(git status)"],
+  "claudePath": "claude",
+  "maxConcurrent": 3
+}
