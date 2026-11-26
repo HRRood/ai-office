@@ -1,15 +1,26 @@
 // Canvas renderer: owns worker entities, moves them along A* paths, runs the camera,
-// and draws the office in 3/4 perspective.
+// and draws the office through the angled orthographic camera of mesh.ts. All camera math goes through
+// its constants (ISO_MATRIX, SKEW, ZK, ISO_ZSCALE) and iso()/unIso()/isoOf(); nothing here assumes an angle.
+//
+// Spaces used below:
+//   plan      art units, project() of a world point: (x + SKEW·z, y − ZK·z); the floor is the tile grid
+//             (16 per tile).
+//   screen    art units, iso(u, v) (= ISO_MATRIX). The camera centre (cx, cy) lives here.
+//   device    canvas pixels: ox + screenX * s, oy + screenY * s, with s = the zoom scale.
+// World-plane things (floor glows, highlights, animated furniture) are drawn in "plan mode": the canvas
+// transform maps plan * s (what px()/py() return) to device px. Billboards (sprites, text, bubbles) are
+// drawn in "screen mode" (identity transform) at device points from toScreen()/worldScreen().
 import { ENTRANCE_ROOM, SLEEP_ROOM, type RoomId } from '../../../shared/rooms.config';
 import { REPORT_ACTION, type SessionState, type WorkerStatus } from '../../../shared/types';
 import { displayName, shorten } from '../../../shared/names';
 import { hash, loadMap, type OfficeMap, type Tile } from './map';
 import { HOLIDAY_INFO, HolidayDecor, currentDate, currentHoliday, giftsUnderTree, santaHat, type DecorView, type Holiday } from './holidays';
 import { findPath } from './pathfinding';
-import { ARCHETYPES, HEAD_DX, SESSION_COLORS, SKINS, getSprite, type Dir, type Frame, type Look } from './sprites';
-import { MAX_RISE, RACK_LEDS, WALL_RISE, renderLayers, windowGlass, type MapLayers } from './tiles';
-import { HOLO_SCAN, JUKE_BANDS, JUKE_RECORD } from './furniture';
-import { poly, shade, softShadow, type Pt } from './lowpoly';
+import { ARCHETYPES, CHAR_SCALE, SESSION_COLORS, SKINS, SPRITE_FEET, SPRITE_HEAD, SPRITE_UNITS, getSprite, type Dir, type Frame, type Look } from './sprites';
+import { MAX_RISE, RACK_LEDS, STRIP_PAD, WALL_IN, WALL_RISE, renderLayers, windowGlass, type MapLayers } from './tiles';
+import { JUKE_BANDS, JUKE_RECORD } from './furniture';
+import { ART_RES, poly, shade, softShadow, type Pt } from './lowpoly';
+import { ISO_MATRIX, ISO_ZSCALE, Mesh, SKEW, ZK, iso, isoOf, unIso, type V3 } from './mesh';
 
 /** UI font stack for every bit of canvas text. */
 const UI_FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
@@ -60,6 +71,87 @@ function unitPts(x: number, y: number, u: number, pts: Array<[number, number]>):
 function hexRgb(hex: string): string {
   const n = parseInt(hex.slice(1), 16);
   return `${n >> 16},${(n >> 8) & 255},${n & 255}`;
+}
+
+/** Where a worker's feet stand inside its tile (fraction of a tile, plan x / y). */
+const FOOT_X = 0.5;
+const FOOT_Y = 0.5;
+/** Sub-agent helpers are drawn at 12/16 of full size. */
+const SUB_SCALE = 12 / 16;
+
+/**
+ * Plan-space lean of a point `z` art units up: (SKEW·z, −ZK·z), as in mesh.ts project(). In this camera
+ * both components are negative (things lean up and left in plan).
+ */
+const leanU = (z: number) => SKEW * z;
+const leanV = (z: number) => -ZK * z;
+/**
+ * A circle of radius r on the floor shows on screen as an axis-aligned ellipse r wide and r·FLOOR_RY
+ * tall: ISO_MATRIX is a turn about the vertical followed by a vertical squash, so its top row has unit
+ * length and the bottom row's length is the squash. (Drawing it as a screen ellipse keeps line widths
+ * and dashes even, which a stroke in plan mode wouldn't.)
+ */
+const FLOOR_RY = Math.hypot(ISO_MATRIX[1], ISO_MATRIX[3]);
+/** Screen-space depth of a tile position (larger = nearer the viewer), for front-most-first ordering. */
+const depthOf = (x: number, y: number) => {
+  const [, sy] = iso(x, y);
+  return sy;
+};
+
+/** World → screen for the props built around a character (scaled like the characters themselves). */
+const charProj = (v: V3): [number, number] => {
+  const [sx, sy] = isoOf(v);
+  return [sx * CHAR_SCALE, sy * CHAR_SCALE];
+};
+
+/**
+ * Bake a mesh built around a character's feet (world origin) into a SPRITE_UNITS canvas aligned like
+ * the character sprites (origin at SPRITE_FEET), so it can be drawn with the same box.
+ */
+const propCache = new Map<string, HTMLCanvasElement>();
+function propSprite(key: string, build: (m: Mesh) => void): HTMLCanvasElement {
+  let c = propCache.get(key);
+  if (!c) {
+    c = document.createElement('canvas');
+    c.width = c.height = SPRITE_UNITS * ART_RES;
+    const g = c.getContext('2d')!;
+    g.scale(ART_RES, ART_RES);
+    const m = new Mesh(7);
+    build(m);
+    m.draw(g, SPRITE_FEET[0], SPRITE_FEET[1], charProj);
+    if (propCache.size > 64) propCache.clear();
+    propCache.set(key, c);
+  }
+  return c;
+}
+
+/** Office chair seen from behind a typing worker (who faces -y): backrest, post and star base at +y. */
+function officeChair(color: string): HTMLCanvasElement {
+  return propSprite(`chair:${color}`, (m) => {
+    const back = '#2a2f3b';
+    m.cylinder(0, 2.6, 0, 2.7, 2.4, 0.45, 5, '#232833', { rot: 0.3, topColor: '#3a4150' });
+    m.cylinder(0, 2.6, 0.45, 0.4, 0.4, 3.6, 6, '#1c2029');
+    m.box(-3, 2.2, 3.6, 6, 1.3, 5.4, back, { chamfer: 0.5, bevel: 0.45, bevelH: 0.35, topColor: '#444b5c' });
+    // a stripe in the session colour across the back of the backrest
+    m.face([[-2.1, 3.52, 6.6], [2.1, 3.52, 6.6], [2.1, 3.52, 7.3], [-2.1, 3.52, 7.3]], color, { emissive: true, layer: 1, alpha: 0.75 });
+  });
+}
+
+/** The manager's high-backed leather chair, behind him (he faces +y). */
+function bossChair(): HTMLCanvasElement {
+  return propSprite('bosschair', (m) => {
+    const frame = '#1c1820';
+    const leather = '#3a2a3a';
+    m.box(-3.6, -2.6, 0, 7.2, 6, 3.4, frame, { chamfer: 0.6 });
+    m.box(-4.6, -4.4, 0, 9.2, 1.8, 15, frame, { chamfer: 0.5, bevel: 0.5, bevelH: 0.4, topColor: '#4a3a4a' });
+    // tufted cushions on the front of the back, lit by the room
+    for (const [z0, z1] of [[3.6, 7.6], [7.8, 11.4], [11.6, 14.2]]) {
+      m.box(-3.8, -2.7, z0, 3.7, 0.5, z1 - z0, leather, { chamfer: 0.2, layer: 1 });
+      m.box(0.1, -2.7, z0, 3.7, 0.5, z1 - z0, shade(leather, -0.05), { chamfer: 0.2, layer: 1 });
+    }
+    for (const [bx, bz] of [[-2, 7.7], [2, 7.7], [-2, 11.5], [2, 11.5]])
+      m.ball(bx, -2.1, bz, 0.45, 0.3, 0.45, '#c8a96a', { layer: 2, jitter: 0 });
+  });
 }
 
 const WALK_SPEED = 4.2; // tiles per second
@@ -233,7 +325,7 @@ export class OfficeRenderer {
   /** Handfuls of pepernoten in flight: thrown from (x, y) in map pixels at time t0. */
   private throws: Array<{ x: number; y: number; t0: number; seed: number }> = [];
 
-  // ----- camera (center in map pixels, zoom relative to "whole office fits") -----
+  // ----- camera (center in screen art units, zoom relative to "whole office fits") -----
   private baseScale = 1;
   private zoom = 1;
   private targetZoom = 1;
@@ -344,8 +436,8 @@ export class OfficeRenderer {
     this.dpr = window.devicePixelRatio || 1;
     this.canvas.width = Math.round(cssW * this.dpr);
     this.canvas.height = Math.round(cssH * this.dpr);
-    const T = this.map.tileSize;
-    this.baseScale = Math.min(this.canvas.width / (this.map.w * T), this.canvas.height / (this.map.h * T + WALL_RISE));
+    const b = this.mapBounds();
+    this.baseScale = Math.min(this.canvas.width / (b.x1 - b.x0), this.canvas.height / (b.y1 - b.y0));
     this.applyCamera();
   }
 
@@ -355,9 +447,33 @@ export class OfficeRenderer {
 
   // ---------- camera ----------
 
-  private homeCenter(): [number, number] {
+  /**
+   * Screen-space bounding box (art units) of a plan rectangle's floor, raised by `rise` art units on top
+   * (heights point straight up the screen, scaled by ISO_ZSCALE).
+   */
+  private screenBounds(u0: number, v0: number, u1: number, v1: number, rise: number) {
+    const pts = [iso(u0, v0), iso(u1, v0), iso(u0, v1), iso(u1, v1)];
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys) - rise * ISO_ZSCALE, y1: Math.max(...ys) };
+  }
+
+  /** The map's screen-space bounding box (art units): the floor plus whatever stands on it. */
+  private mapBounds() {
     const T = this.map.tileSize;
-    return [(this.map.w * T) / 2, (this.map.h * T - WALL_RISE) / 2];
+    return this.screenBounds(0, 0, this.map.w * T, this.map.h * T, MAX_RISE);
+  }
+
+  private homeCenter(): [number, number] {
+    const b = this.mapBounds();
+    return [(b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2];
+  }
+
+  /** Screen-space point (art units) the camera centres on to look at a worker. */
+  private workerCenter(w: Worker): [number, number] {
+    const T = this.map.tileSize;
+    // about the middle of the figure
+    return isoOf([(w.x + FOOT_X) * T, (w.y + FOOT_Y) * T, 6 * CHAR_SCALE]);
   }
 
   private emitCamera() {
@@ -365,14 +481,14 @@ export class OfficeRenderer {
   }
 
   private clampCenter(x: number, y: number, zoom: number): [number, number] {
-    const T = this.map.tileSize;
+    const b = this.mapBounds();
     const s = this.baseScale * zoom;
     const halfW = this.canvas.width / 2 / s;
     const halfH = this.canvas.height / 2 / s;
-    const minX = halfW;
-    const maxX = this.map.w * T - halfW;
-    const minY = -WALL_RISE + halfH;
-    const maxY = this.map.h * T - halfH;
+    const minX = b.x0 + halfW;
+    const maxX = b.x1 - halfW;
+    const minY = b.y0 + halfH;
+    const maxY = b.y1 - halfH;
     const [hx, hy] = this.homeCenter();
     return [minX > maxX ? hx : Math.max(minX, Math.min(maxX, x)), minY > maxY ? hy : Math.max(minY, Math.min(maxY, y))];
   }
@@ -387,8 +503,8 @@ export class OfficeRenderer {
     if (this.followId) {
       const w = this.workers.get(this.followId);
       if (w && !w.leaving) {
-        const T = this.map.tileSize;
-        [this.tcx, this.tcy] = this.clampCenter((w.x + 0.5) * T, (w.y + 0.2) * T, this.targetZoom);
+        const [fx, fy] = this.workerCenter(w);
+        [this.tcx, this.tcy] = this.clampCenter(fx, fy, this.targetZoom);
       } else this.follow(null);
     }
     const k = Math.min(1, dt * 10);
@@ -439,11 +555,11 @@ export class OfficeRenderer {
     this.follow(null);
     const T = this.map.tileSize;
     const [x0, y0, x1, y1] = this.map.rooms[id].rect;
-    const wpx = (x1 - x0 + 1) * T;
-    const hpx = (y1 - y0 + 1) * T + WALL_RISE;
-    const z = Math.min(this.canvas.width / (wpx * this.baseScale), this.canvas.height / (hpx * this.baseScale)) * 0.9;
+    // the room's floor on screen, plus its back walls rising above it
+    const { x0: left, x1: right, y0: top, y1: bottom } = this.screenBounds(x0 * T, y0 * T, (x1 + 1) * T, (y1 + 1) * T, WALL_RISE);
+    const z = Math.min(this.canvas.width / ((right - left) * this.baseScale), this.canvas.height / ((bottom - top) * this.baseScale)) * 0.9;
     this.targetZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z));
-    [this.tcx, this.tcy] = this.clampCenter(((x0 + x1 + 1) / 2) * T, ((y0 + y1 + 1) / 2) * T - WALL_RISE / 2, this.targetZoom);
+    [this.tcx, this.tcy] = this.clampCenter((left + right) / 2, (top + bottom) / 2, this.targetZoom);
     this.emitCamera();
   }
 
@@ -451,8 +567,8 @@ export class OfficeRenderer {
     const w = this.workers.get(id);
     if (!w) return;
     this.targetZoom = Math.max(this.targetZoom, 3.2);
-    const T = this.map.tileSize;
-    [this.tcx, this.tcy] = this.clampCenter((w.x + 0.5) * T, (w.y + 0.2) * T, this.targetZoom);
+    const [fx, fy] = this.workerCenter(w);
+    [this.tcx, this.tcy] = this.clampCenter(fx, fy, this.targetZoom);
     this.emitCamera();
   }
 
@@ -566,7 +682,7 @@ export class OfficeRenderer {
 
   /** Standing in the airlock doorway? */
   private onAirlock(me: Worker) {
-    return this.map.at(Math.floor(me.x + 0.5), Math.floor(me.y + 0.8)) === 'E';
+    return this.map.at(Math.floor(me.x + FOOT_X), Math.floor(me.y + FOOT_Y)) === 'E';
   }
 
   private spawnPlayer(now: number, at?: Tile) {
@@ -583,10 +699,10 @@ export class OfficeRenderer {
 
   /** Can your feet be at (x, y)? Checks a small box around the feet against walkable tiles. */
   private playerFits(x: number, y: number) {
-    const fx = x + 0.5;
-    const fy = y + 0.8;
-    const rx = 0.28;
-    const ry = 0.16;
+    const fx = x + FOOT_X;
+    const fy = y + FOOT_Y;
+    const rx = 0.24;
+    const ry = 0.24;
     for (const [px, py] of [[fx - rx, fy - ry], [fx + rx, fy - ry], [fx - rx, fy + ry], [fx + rx, fy + ry]])
       if (!this.map.isWalkable(Math.floor(px), Math.floor(py))) return false;
     return true;
@@ -614,7 +730,7 @@ export class OfficeRenderer {
       if (this.playerFits(me.x, ny)) me.y = ny;
       me.walked += PLAYER_SPEED * dt;
       me.dir = Math.abs(dx) >= Math.abs(dy) && dx !== 0 ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'down' : 'up';
-      me.room = this.map.roomAt(Math.round(me.x), Math.round(me.y + 0.3)) ?? me.room;
+      me.room = this.map.roomAt(Math.floor(me.x + FOOT_X), Math.floor(me.y + FOOT_Y)) ?? me.room;
       if (this.followId !== PLAYER_ID) this.follow(PLAYER_ID);
       // Walking out through the airlock (pushing against the outer edge) leaves the office.
       const edge = this.map.entrance[0] === 0 ? dx < 0 && me.x <= 0.05 : dx > 0 && me.x >= this.map.w - 1.05;
@@ -649,11 +765,15 @@ export class OfficeRenderer {
     const [x, y] = this.toCanvas(clientX, clientY);
     const t = performance.now();
     const visible = [...this.workers.values()].filter((w) => !w.leaving);
-    const pad = 2 * this.scale;
-    // sprites, front-most first
-    for (const w of [...visible].sort((a, b) => b.y - a.y)) {
+    const pad = 1.5 * this.scale;
+    // sprites (the figure inside the sprite box), front-most first
+    for (const w of [...visible].sort((a, b) => depthOf(b.x, b.y) - depthOf(a.x, a.y))) {
       const b = this.spriteBox(w, t);
-      if (x >= b.x - pad && x <= b.x + b.size + pad && y >= b.y - pad && y <= b.y + b.size + pad)
+      const half = 4.5 * CHAR_SCALE * b.u; // about the figure's half width
+      const [l, r] = [b.hx - half, b.hx + half];
+      const top = b.hy - 5 * CHAR_SCALE * ISO_ZSCALE * b.u - half * 0.3;
+      const bot = b.y + (SPRITE_FEET[1] + 1.5) * b.u;
+      if (x >= l - pad && x <= r + pad && y >= top - pad && y <= bot + pad)
         return { kind: 'worker', sessionId: w.sessionId, workerId: w.id };
     }
     // name tags / bubbles, top-most first
@@ -662,11 +782,10 @@ export class OfficeRenderer {
       if (!c.w.leaving && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h)
         return { kind: 'worker', sessionId: c.w.sessionId, workerId: c.w.id };
     }
-    // room under the pointer (floor or furniture inside its walls)
+    // room under the pointer: the floor tile there (furniture inside a room picks that room's floor too)
     const T = this.map.tileSize;
-    const tx = Math.floor((x - this.ox) / (T * this.scale));
-    const ty = Math.floor((y - this.oy) / (T * this.scale));
-    const room = this.map.roomAt(tx, ty);
+    const [u, v] = unIso((x - this.ox) / this.scale, (y - this.oy) / this.scale);
+    const room = this.map.roomAt(Math.floor(u / T), Math.floor(v / T));
     return room ? { kind: 'room', roomId: room } : null;
   }
 
@@ -693,7 +812,7 @@ export class OfficeRenderer {
       for (const a of s.subagents) {
         const id = `${s.id}:${a.id}`;
         live.add(id);
-        this.upsert(id, s.id, true, a.agentType, { ...look, archetype: 'droid' }, this.displayRoom(a.room, a.status), a.status, a.action, now);
+        this.upsert(id, s.id, true, a.agentType, { ...look, archetype: 'astromech' }, this.displayRoom(a.room, a.status), a.status, a.action, now);
       }
     }
     for (const w of this.workers.values()) if (!live.has(w.id) && !w.leaving && !isNpc(w.id)) this.sendOff(w);
@@ -1118,13 +1237,16 @@ export class OfficeRenderer {
 
   private throwPepernoten(w: Worker, now: number) {
     const T = this.map.tileSize;
-    this.throws.push({ x: (w.x + 0.5) * T, y: (w.y + 0.3) * T, t0: now, seed: Math.floor(Math.random() * 1e6) });
+    this.throws.push({ x: (w.x + FOOT_X) * T, y: (w.y + FOOT_Y) * T, t0: now, seed: Math.floor(Math.random() * 1e6) });
   }
 
   /** Pepernoten flying out in little arcs and bouncing on the floor. */
   private drawThrows(now: number) {
     const { ctx, scale: s } = this;
+    this.screenMode();
     for (const th of this.throws) {
+      // launched from about hand height above the thrower's feet
+      const [bx, by] = this.toScreen(th.x * s, th.y * s);
       const p = (now - th.t0) / 1100;
       if (p > 1.25) continue;
       for (let i = 0; i < 9; i++) {
@@ -1134,8 +1256,8 @@ export class OfficeRenderer {
         const q = Math.min(p, 1);
         const dx = Math.cos(angle) * speed * q;
         const arc = Math.sin(Math.min(q, 1) * Math.PI) * (10 + (k % 8)); // up then down to the floor
-        const x = this.ox + (th.x + dx) * s;
-        const y = this.oy + (th.y + 6 * q - arc) * s;
+        const x = bx + dx * s;
+        const y = by + (-8 + 6 * q - arc) * s;
         ctx.globalAlpha = p > 1 ? Math.max(0, 1 - (p - 1) * 4) : 1;
         // a little round cookie: body plus a lit top-left facet
         const base = i % 2 ? '#8a5a30' : '#a06a3a';
@@ -1170,11 +1292,14 @@ export class OfficeRenderer {
     // Baked art is high-res low-poly now: smooth scaling, not the old pixel grid.
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
+    this.screenMode();
     ctx.fillStyle = '#0b1026';
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-    ctx.drawImage(this.layers.floor, this.ox, this.oy, map.w * T * s, map.h * T * s);
+    this.planMode();
+    ctx.drawImage(this.layers.floor, 0, 0, map.w * T * s, map.h * T * s);
 
-    const sorted = [...this.workers.values()].sort((a, b) => a.y - b.y);
+    // back to front: by row, then along the row
+    const sorted = [...this.workers.values()].sort((a, b) => a.y - b.y || a.x - b.x);
     for (const w of sorted) this.drawContactShadow(w, t);
     this.drawBossAura(t);
     for (const w of sorted) this.drawFloorMarker(w, t);
@@ -1187,12 +1312,14 @@ export class OfficeRenderer {
     // are in row y is in front of everything based in rows <= y and behind rows > y.
     const byRow = new Map<number, Worker[]>();
     for (const w of sorted) {
-      const row = Math.max(0, Math.min(map.h - 1, Math.floor(w.y + 1e-6)));
+      const row = Math.max(0, Math.min(map.h - 1, Math.floor(w.y + FOOT_Y + 1e-6)));
       byRow.set(row, [...(byRow.get(row) ?? []), w]);
     }
     for (let y = 0; y < map.h; y++) {
-      ctx.drawImage(this.layers.strips[y], this.ox, this.py(y) - MAX_RISE * s, map.w * T * s, (T + MAX_RISE) * s);
+      this.planMode();
+      ctx.drawImage(this.layers.strips[y], -STRIP_PAD * s, this.py(y) - MAX_RISE * s, (STRIP_PAD + map.w * T) * s, (T + MAX_RISE) * s);
       this.drawAnimatedRow(y, t);
+      this.planMode();
       this.decor.drawRow(this.holiday, y, view, t);
       for (const w of byRow.get(y) ?? []) {
         if (w.id === BOSS_ID) this.drawBossChair(w, t);
@@ -1210,20 +1337,75 @@ export class OfficeRenderer {
     if (this.evening) this.drawParty(t);
     this.drawBossPresence(t);
     this.drawThrows(performance.now());
+    this.screenMode();
     this.decor.drawOverlay(this.holiday, view, t);
     this.drawRoomHighlight(t);
     this.drawRoomLabels();
 
+    this.screenMode();
     const callouts = this.layoutCallouts(sorted, t);
     this.lastCallouts = callouts;
     for (const c of callouts) this.drawCallout(c, t);
   }
 
+  /** Plan x of a tile column, in plan-mode units (plan art units * scale). */
   private px(tx: number) {
-    return this.ox + tx * this.map.tileSize * this.scale;
+    return tx * this.map.tileSize * this.scale;
   }
+  /** Plan y of a tile row, in plan-mode units. */
   private py(ty: number) {
-    return this.oy + ty * this.map.tileSize * this.scale;
+    return ty * this.map.tileSize * this.scale;
+  }
+
+  /** Draw in plan space: (px, py)-style coordinates map onto the isometric floor. */
+  private planMode() {
+    // px()/py() already include the zoom scale, so the camera's plan → screen matrix applies as is
+    const [a, b, c, d] = ISO_MATRIX;
+    this.ctx.setTransform(a, b, c, d, this.ox, this.oy);
+  }
+
+  /** Draw in device pixels (billboards, text). */
+  private screenMode() {
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+
+  /** Device point of a plan-mode point (plan art units * scale). */
+  private toScreen(pu: number, pv: number): [number, number] {
+    const [sx, sy] = iso(pu, pv);
+    return [this.ox + sx, this.oy + sy];
+  }
+
+  /** Device point of a world point: tile coordinates on the floor, plus a height z in art units. */
+  private worldScreen(tx: number, ty: number, z = 0): [number, number] {
+    const zs = z * this.scale;
+    return this.toScreen(this.px(tx) + leanU(zs), this.py(ty) + leanV(zs));
+  }
+
+  /**
+   * Plan-mode path around a plan rectangle (plan-mode units) and everything standing in it up to `rise`
+   * art units tall: height leans things by (leanU, leanV) in plan (both ≤ 0), so the hull is the rect
+   * swept along that lean, a hexagon.
+   */
+  private hullPath(x: number, y: number, w: number, h: number, rise: number) {
+    const { ctx } = this;
+    const dx = leanU(rise * this.scale);
+    const dy = leanV(rise * this.scale);
+    ctx.moveTo(x + dx, y + dy);
+    ctx.lineTo(x + w + dx, y + dy);
+    ctx.lineTo(x + w, y);
+    ctx.lineTo(x + w, y + h);
+    ctx.lineTo(x, y + h);
+    ctx.lineTo(x + dx, y + h + dy);
+    ctx.closePath();
+  }
+
+  /** A room's floor inside its walls, as a plan-mode rect. `pad` (art units) widens it under the walls. */
+  private roomPlanRect(id: RoomId, pad = 0): Rect {
+    const [x0, y0, x1, y1] = this.map.rooms[id].rect;
+    const p = pad * this.scale;
+    const x = this.px(x0 + 1) - p;
+    const y = this.py(y0 + 1) - p;
+    return { x, y, w: this.px(x1) - x, h: this.py(y1) - y };
   }
 
   private font(px: number, weight = 600) {
@@ -1236,58 +1418,65 @@ export class OfficeRenderer {
     return Math.round(Math.max(min, Math.min(max, css)) * this.dpr);
   }
 
-  private roomScreenRect(id: RoomId): Rect {
-    const [x0, y0, x1, y1] = this.map.rooms[id].rect;
-    const x = this.px(x0 + 1);
-    const y = this.py(y0 + 1) - WALL_RISE * this.scale * 0.3;
-    return { x, y, w: this.px(x1) - x, h: this.py(y1) - y };
-  }
-
-  /** Selected room: dim everything else and outline it. Hovered room: soft outline. */
+  /**
+   * Selected room: dim everything else and outline its floor. Hovered room: soft outline.
+   * Paths are built in plan mode (so they follow the iso floor) and stroked in screen mode (even lines).
+   */
   private drawRoomHighlight(t: number) {
     const { ctx } = this;
     const lw = Math.max(1.5, this.scale * 0.6);
     const sel = this.sel.roomId;
+    const outline = (id: RoomId) => {
+      const r = this.roomPlanRect(id);
+      this.planMode();
+      ctx.beginPath();
+      ctx.roundRect(r.x, r.y, r.w, r.h, 4 * this.scale);
+      this.screenMode();
+    };
     if (sel) {
-      const r = this.roomScreenRect(sel);
+      // the hole keeps the room's floor and its own back walls bright
+      const r = this.roomPlanRect(sel, WALL_IN);
+      this.screenMode();
       ctx.fillStyle = 'rgba(5,8,20,0.5)';
       ctx.beginPath();
       ctx.rect(0, 0, this.canvas.width, this.canvas.height);
-      ctx.roundRect(r.x, r.y, r.w, r.h, 4 * this.scale);
+      this.planMode();
+      this.hullPath(r.x, r.y, r.w, r.h, WALL_RISE);
+      this.screenMode();
       ctx.fill('evenodd');
       ctx.strokeStyle = '#4ff0ff';
       ctx.lineWidth = lw;
       ctx.setLineDash([6 * this.dpr, 4 * this.dpr]);
       ctx.lineDashOffset = -t / 40;
-      ctx.beginPath();
-      ctx.roundRect(r.x, r.y, r.w, r.h, 4 * this.scale);
+      outline(sel);
       ctx.stroke();
       ctx.setLineDash([]);
     }
     if (this.hover?.kind === 'room' && this.hover.roomId !== sel) {
-      const r = this.roomScreenRect(this.hover.roomId);
       ctx.strokeStyle = 'rgba(79,240,255,0.45)';
       ctx.lineWidth = lw;
-      ctx.beginPath();
-      ctx.roundRect(r.x, r.y, r.w, r.h, 4 * this.scale);
+      outline(this.hover.roomId);
       ctx.stroke();
     }
   }
 
   private drawRoomLabels() {
     const { ctx, map } = this;
+    this.screenMode();
     const size = this.textSize(4.2, 9, 15);
     ctx.font = this.font(size, 700);
     ctx.textBaseline = 'top';
     for (const [id, room] of Object.entries(map.rooms)) {
       if (map.rooms[id as RoomId] !== room) continue; // alias for a missing room
       const [x0, y0] = room.rect;
-      // A sign on the room's back wall (the wall cap rises WALL_RISE px above its tile).
-      const x = this.px(x0 + 1) + 2 * this.scale;
-      const y = this.py(y0) - WALL_RISE * this.scale + 3 * this.scale;
       const cantina = this.evening && id === CANTINA;
       const text = cantina ? '🍺 CANTINA' : room.label.toUpperCase();
       const w = ctx.measureText(text).width;
+      // A sign hanging just inside the room's back corner (the top of its floor diamond), level with the
+      // wall caps there.
+      const [ax, ay] = this.worldScreen(x0 + 1, y0 + 1, WALL_RISE);
+      const x = ax - w / 2;
+      const y = ay + 6 * this.scale;
       const active = this.sel.roomId === id || (this.hover?.kind === 'room' && this.hover.roomId === id);
       const ph = size + 6 * this.dpr;
       ctx.save();
@@ -1314,11 +1503,21 @@ export class OfficeRenderer {
     }
   }
 
-  /** Top-left of the sprite in screen pixels, plus its size. */
+  /** Device point of a worker's feet on the floor. */
+  private feetOf(w: Worker): [number, number] {
+    return this.toScreen(this.px(w.x + FOOT_X), this.py(w.y + FOOT_Y));
+  }
+
+  /**
+   * The sprite box in device px: top-left (x, y), side `size` (= SPRITE_UNITS drawn), `u` = device px per
+   * sprite unit; feet (fx, fy) on the floor; head (hx, hy) where tags and bubbles anchor; `foot` = the
+   * size of the old 16-unit sprite, for floor rings and shadows.
+   */
   private spriteBox(w: Worker, t: number) {
     const s = this.scale;
-    const T = this.map.tileSize;
-    const size = (w.isSub ? 12 : 16) * s;
+    const k = w.isSub ? SUB_SCALE : 1;
+    const size = SPRITE_UNITS * s * k;
+    const u = size / SPRITE_UNITS;
     const moving = w.path.length > 0;
     // a smooth breathing bob while working (same 800 ms rhythm as the old 1-unit hop)
     const bob = !moving && w.status === 'working' ? (1 - Math.cos((t / 400) * Math.PI)) / 2 : 0;
@@ -1326,20 +1525,31 @@ export class OfficeRenderer {
     const p = p0 === undefined ? 1 : (performance.now() - p0) / POKE_MS;
     let hop = p < 1 ? Math.sin(p * Math.PI) * 6 : 0;
     if (p >= 1 && this.partying(w)) hop = Math.abs(Math.sin(((t + (hash(w.id) % 4) * 120) / BEAT_MS) * Math.PI)) * 1.5;
-    const x = this.px(w.x) + (T * s - size) / 2;
-    const y = this.py(w.y) + (T * s - size) - 3 * s - (bob + hop) * s;
-    return { x, y, size, hop, lift: bob + hop };
+    const [fx, fy] = this.feetOf(w);
+    const x = fx - SPRITE_FEET[0] * u;
+    const y = fy - SPRITE_FEET[1] * u - (bob + hop) * s;
+    return { x, y, size, u, fx, fy, hx: x + SPRITE_HEAD[0] * u, hy: y + SPRITE_HEAD[1] * u, foot: 16 * s * k, hop, lift: bob + hop };
+  }
+
+  /**
+   * A frame for 2D overlays drawn in the old 16-unit sprite coordinates (head at (8, 4.4)), scaled like the
+   * characters: returns the device position of that box's origin and its unit.
+   */
+  private legacyBox(b: { hx: number; hy: number; u: number }) {
+    // the old box had its feet at (8, 15), so match the head-to-feet span of the current sprites
+    const u = (b.u * (SPRITE_FEET[1] - SPRITE_HEAD[1])) / (15 - 4.4);
+    return { x: b.hx - 8 * u, y: b.hy - 4.4 * u, u };
   }
 
   /** Soft contact shadow on the floor under the feet; shrinks and fades as they hop. */
   private drawContactShadow(w: Worker, t: number) {
-    const { ctx, scale: s } = this;
-    const { x, y, size, lift } = this.spriteBox(w, t);
-    const cx = x + size / 2;
-    const cy = y + size - 1 * s + lift * s; // feet on the floor (sprite unit y ~15)
+    const { ctx } = this;
+    this.screenMode();
+    const { fx: cx, fy: cy, foot: size, lift } = this.spriteBox(w, t);
     const k = 1 - Math.min(0.45, lift / 10);
+    // a circle on the floor (see FLOOR_RY)
     const rx = size * 0.36 * k;
-    const ry = size * 0.14 * k;
+    const ry = rx * FLOOR_RY;
     const idle = w.status === 'idle' && !w.path.length && !this.partying(w);
     ctx.globalAlpha = 0.42 * k * (idle ? 0.6 : 1);
     ctx.drawImage(contactShadow(), cx - rx, cy - ry, rx * 2, ry * 2);
@@ -1372,24 +1582,25 @@ export class OfficeRenderer {
   /** Selection/hover ring and pulsing red "waiting" ring under the worker's feet. */
   private drawFloorMarker(w: Worker, t: number) {
     const { ctx, scale: s } = this;
-    const { x, y, size, hop } = this.spriteBox(w, t);
-    const cx = x + size / 2;
-    const cy = y + size - 1 * s + hop * s;
+    this.screenMode();
+    // floor rings are circles on the floor: ellipses around the feet (see FLOOR_RY)
+    const { fx: cx, fy: cy, foot: size } = this.spriteBox(w, t);
     if (w.status === 'waiting') {
       const p = (t % 1200) / 1200;
       const rx = size * (0.35 + p * 0.5);
-      const ry = size * (0.15 + p * 0.22);
+      const ry = rx * FLOOR_RY;
       // a soft red pool under the feet plus an expanding ripple
       ctx.globalCompositeOperation = 'lighter';
       ctx.globalAlpha = 0.35 * (1 - p * 0.5);
-      ctx.drawImage(glowSprite('232,60,60'), cx - size * 0.5, cy - size * 0.22, size, size * 0.44);
+      ctx.drawImage(glowSprite('232,60,60'), cx - size * 0.5, cy - size * 0.5 * FLOOR_RY, size, size * FLOOR_RY);
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
       this.glowRing(cx, cy, rx, ry, '#ff4a4a', 0.9 * (1 - p), Math.max(1, s * 0.7));
     }
     if (this.nearbyId === w.id) {
       const p = 0.5 + 0.5 * Math.sin(t / 220);
-      this.glowRing(cx, cy, size * (0.55 + 0.05 * p), size * 0.23, '#ffd84d', 0.55 + 0.4 * p, Math.max(1.5, s * 0.7));
+      const rx = size * (0.55 + 0.05 * p);
+      this.glowRing(cx, cy, rx, rx * FLOOR_RY, '#ffd84d', 0.55 + 0.4 * p, Math.max(1.5, s * 0.7));
     }
     const exact = this.sel.workerId === w.id;
     const family = !exact && this.sel.sessionId === w.sessionId;
@@ -1402,16 +1613,17 @@ export class OfficeRenderer {
         ctx.globalAlpha = 0.16;
         ctx.fillStyle = w.look.color;
         ctx.beginPath();
-        ctx.ellipse(cx, cy, size * 0.5, size * 0.21, 0, 0, Math.PI * 2);
+        ctx.ellipse(cx, cy, size * 0.5, size * 0.5 * FLOOR_RY, 0, 0, Math.PI * 2);
         ctx.fill();
         ctx.globalAlpha = 1;
       }
-      this.glowRing(cx, cy, size * 0.5, size * 0.21, w.look.color, alpha, lw, exact ? [2.2 * s, 1.6 * s] : undefined, -t / 60);
+      this.glowRing(cx, cy, size * 0.5, size * 0.5 * FLOOR_RY, w.look.color, alpha, lw, exact ? [2.2 * s, 1.6 * s] : undefined, -t / 60);
     }
   }
 
   private drawWorker(w: Worker, t: number, typing = false) {
     const { ctx } = this;
+    this.screenMode();
     const { x, y, size } = this.spriteBox(w, t);
     let frame: Frame = w.path.length || w.moving ? STEP_FRAMES[Math.floor(w.walked * 4) % 4] : 0;
     // Typing rhythm: hands alternate at a slightly uneven, per-worker pace.
@@ -1436,8 +1648,8 @@ export class OfficeRenderer {
   /** A beer mug in hand; every few seconds a sip. */
   private drawBeer(w: Worker, t: number, dir: Dir) {
     const { ctx } = this;
-    const { x, y, size } = this.spriteBox(w, t);
-    const u = size / 16;
+    this.screenMode();
+    const { x, y, u } = this.legacyBox(this.spriteBox(w, t));
     const sipping = (t + (hash(w.id) % 4000)) % 4000 < 700;
     const flip = dir === 'left';
     // hand position (sprite pixels): by the side, or up at the mouth while sipping
@@ -1485,11 +1697,20 @@ export class OfficeRenderer {
 
   /** The monitor in front of a typing worker shows code scrolling by. */
   private drawCodeScreen(w: Worker, t: number) {
-    const { ctx, scale: s } = this;
+    const { ctx } = this;
     const [dx, dy] = [Math.round(w.x), Math.round(w.y) - 1];
-    // screen area of the desk sprite (see tiles.ts 'd'): x 4..12, y -4..2 relative to the desk tile
-    const sx = this.px(dx) + 4 * s;
-    const sy = this.py(dy) - 4 * s;
+    // The desk monitor's glass (furniture.ts 'd') is the plane y = 11.02 of the desk tile, x 3.8..12.2,
+    // z 8.8..14.2. Draw on that plane (x along it, -z down it), then work in an 8 x 6 box over the glass.
+    this.planMode();
+    ctx.save();
+    ctx.translate(this.px(dx), this.py(dy));
+    ctx.scale(this.scale, this.scale);
+    ctx.transform(1, 0, -SKEW, 1, 0, 11.05); // face plane: x along it, -z down it (like furniture.ts onPlane)
+    ctx.translate(3.8, -14.2);
+    ctx.scale(8.4 / 8, 5.4 / 6);
+    const s = 1;
+    const sx = 0;
+    const sy = 0;
     ctx.fillStyle = '#0d1626';
     ctx.beginPath();
     ctx.roundRect(sx, sy, 8 * s, 6 * s, 0.6 * s);
@@ -1523,6 +1744,7 @@ export class OfficeRenderer {
     ctx.drawImage(glowSprite('120,200,255'), sx - 4 * s, sy - 3 * s, 16 * s, 13 * s);
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
+    ctx.restore();
   }
 
   /** A low red aura pulsing on the floor around the manager's desk. */
@@ -1531,17 +1753,19 @@ export class OfficeRenderer {
     if (!boss) return;
     const { ctx, scale: s } = this;
     const T = this.map.tileSize;
-    const cx = this.px(boss.x + 0.5);
+    // a disc on the floor around him and his desk (plan mode: it lies flat on the iso floor)
+    this.planMode();
+    const cx = this.px(boss.x + FOOT_X);
     const cy = this.py(boss.y + 1);
     const pulse = 0.75 + 0.25 * Math.sin(t / 900);
-    const rad = T * s * 3.2 * (0.92 + 0.08 * pulse);
+    const rad = T * s * 2.4 * (0.92 + 0.08 * pulse);
     const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
     g.addColorStop(0, `rgba(200,10,30,${0.32 * pulse})`);
     g.addColorStop(0.6, `rgba(140,0,20,${0.14 * pulse})`);
     g.addColorStop(1, 'rgba(120,0,20,0)');
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.ellipse(cx, cy, rad, rad * 0.6, 0, 0, Math.PI * 2);
+    ctx.arc(cx, cy, rad, 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -1549,21 +1773,24 @@ export class OfficeRenderer {
   private drawBossPresence(t: number) {
     const boss = this.workers.get(BOSS_ID);
     if (!boss) return;
-    const { ctx, scale: s } = this;
+    const { ctx } = this;
     const since = performance.now() - boss.actionAt;
     const k = since < 300 ? since / 300 : since < BOSS_SPEAK_MS ? 1 : Math.max(0, 1 - (since - BOSS_SPEAK_MS) / 800);
     if (k > 0) {
-      const [x0, y0, x1, y1] = this.map.rooms[BOSS_ROOM].rect;
-      const rx = this.px(x0 + 1);
-      const ry = this.py(y0 + 1) - WALL_RISE * s;
+      // his office's floor and everything standing in it
+      const r = this.roomPlanRect(BOSS_ROOM, WALL_IN);
+      this.planMode();
       ctx.fillStyle = `rgba(4,2,10,${0.42 * k})`;
-      ctx.fillRect(rx, ry, this.px(x1) - rx, this.py(y1) - ry);
+      ctx.beginPath();
+      this.hullPath(r.x, r.y, r.w, r.h, WALL_RISE);
+      ctx.fill();
     }
     // visor glow (always a little, brighter while speaking)
-    const { x, y, size } = this.spriteBox(boss, t);
-    const u = size / 16;
-    const vx = x + 8 * u;
-    const vy = y + 4.5 * u;
+    this.screenMode();
+    const b = this.spriteBox(boss, t);
+    const u = b.u * CHAR_SCALE;
+    const vx = b.hx;
+    const vy = b.hy;
     const glow = 0.25 + 0.55 * k + 0.1 * Math.sin(t / 500);
     const g = ctx.createRadialGradient(vx, vy, 0, vx, vy, 7 * u);
     g.addColorStop(0, `rgba(255,40,60,${glow})`);
@@ -1576,74 +1803,26 @@ export class OfficeRenderer {
 
   /** The manager's high-backed leather chair, behind him. */
   private drawBossChair(w: Worker, t: number) {
-    const { ctx } = this;
-    const { x, y, size } = this.spriteBox(w, t);
-    const u = size / 16;
-    const P = (pts: Array<[number, number]>) => unitPts(x, y, u, pts);
-    const frame = '#1c1820';
-    const leather = '#3a2a3a';
-    // frame: high back with bevelled top corners, right edge in shade
-    poly(ctx, P([[3.2, -3], [12.8, -3], [14, -1.8], [14, 12], [2, 12], [2, -1.8]]), frame);
-    poly(ctx, P([[12.9, -2.6], [14, -1.8], [14, 12], [12.9, 12]]), shade(frame, -0.35));
-    poly(ctx, P([[2, -1.8], [3.2, -3], [3.4, -2.4], [2.6, -1.4], [2.6, 12], [2, 12]]), shade(frame, 0.25));
-    // tufted leather cushion: two columns of facets, lit left, shaded right
-    const rows: Array<[number, number]> = [[-2, 2.5], [2.5, 6.5], [6.5, 11]];
-    rows.forEach(([a, b], i) => {
-      const top = i === 0 ? leather : shade(leather, -0.04 * i);
-      poly(ctx, P([[3, a], [8, a + 0.5], [8, b - 0.2], [3, b]]), shade(top, 0.1));
-      poly(ctx, P([[8, a + 0.5], [13, a], [13, b], [8, b - 0.2]]), shade(top, -0.14));
-    });
-    // top bevel catches the light
-    poly(ctx, P([[3, -2], [13, -2], [12.4, -1.3], [3.6, -1.3]]), '#4a3a4a');
-    // brass studs at the tufts
-    for (const [bx, by] of [[4.5, 0.5], [11.5, 0.5], [4.5, 5.5], [11.5, 5.5]]) {
-      ctx.fillStyle = '#9c7d4a';
-      ctx.beginPath();
-      ctx.arc(x + bx * u, y + by * u, 0.55 * u, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#e8c98a';
-      ctx.beginPath();
-      ctx.arc(x + (bx - 0.18) * u, y + (by - 0.18) * u, 0.25 * u, 0, Math.PI * 2);
-      ctx.fill();
-    }
+    this.screenMode();
+    const b = this.spriteBox(w, t);
+    // on the floor: the chair doesn't bob or hop with him
+    this.ctx.drawImage(bossChair(), b.x, b.y + b.lift * this.scale, b.size, b.size);
   }
 
   /** Office chair back, drawn over the seated worker (we see them from behind). */
   private drawChair(w: Worker, t: number) {
-    const { ctx } = this;
-    const { x, y, size } = this.spriteBox(w, t);
-    const u = size / 16; // one sprite unit
-    const P = (pts: Array<[number, number]>) => unitPts(x, y, u, pts);
-    const back = '#2a2f3b';
-    // post + star base with little casters
-    poly(ctx, P([[7.2, 12.6], [8.8, 12.6], [8.6, 15], [7.4, 15]]), '#1c2029');
-    poly(ctx, P([[4, 15.2], [7.4, 14.6], [8.6, 14.6], [12, 15.2], [11.6, 15.8], [4.4, 15.8]]), '#232833');
-    poly(ctx, P([[4, 15.2], [7.4, 14.6], [8.6, 14.6], [12, 15.2]]), '#3a4150');
-    ctx.fillStyle = '#12151c';
-    for (const cxu of [4.4, 8, 11.6]) {
-      ctx.beginPath();
-      ctx.arc(x + cxu * u, y + 15.9 * u, 0.45 * u, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    // backrest: a rounded, bevelled cushion (we see it from behind)
-    poly(ctx, P([[4.8, 9], [11.2, 9], [12, 9.8], [12, 12.4], [11.4, 13], [4.6, 13], [4, 12.4], [4, 9.8]]), back);
-    poly(ctx, P([[4.8, 9], [11.2, 9], [12, 9.8], [4, 9.8]]), '#444b5c'); // lit top bevel
-    poly(ctx, P([[11, 9.8], [12, 9.8], [12, 12.4], [11.4, 13], [11, 13]]), shade(back, -0.3)); // shaded right side
-    poly(ctx, P([[4, 9.8], [4.7, 9.8], [4.7, 13], [4.6, 13], [4, 12.4]]), shade(back, 0.15)); // lit left side
-    ctx.globalAlpha = 0.65;
-    ctx.fillStyle = w.look.color; // a stripe in the session color
-    ctx.beginPath();
-    ctx.roundRect(x + 5 * u, y + 11 * u, 6 * u, 0.9 * u, 0.45 * u);
-    ctx.fill();
-    ctx.globalAlpha = 1;
+    this.screenMode();
+    const b = this.spriteBox(w, t);
+    this.ctx.drawImage(officeChair(w.look.color), b.x, b.y + b.lift * this.scale, b.size, b.size);
   }
 
   /** Little code symbols float up from the keyboard while typing. */
   private drawKeystrokes(w: Worker, t: number) {
     const { ctx, scale: s } = this;
+    this.screenMode();
     const period = 900;
-    const baseX = this.px(Math.round(w.x)) + 8 * s;
-    const baseY = this.py(Math.round(w.y) - 1) + 8 * s; // keyboard row on the desk
+    // keyboard on the desk top (furniture.ts 'd': around x 7, y 13, z 5.6 of the desk tile)
+    const [baseX, baseY] = this.worldScreen(Math.round(w.x) + 7.2 / 16, Math.round(w.y) - 1 + 13 / 16, 5.6);
     const fs = Math.max(6, Math.round(3.6 * s));
     ctx.font = this.font(fs, 700);
     ctx.textAlign = 'center';
@@ -1669,8 +1848,11 @@ export class OfficeRenderer {
     const out: Callout[] = [];
     const roomSel = this.sel.roomId;
     for (const w of sorted) {
-      const { x, y, size } = this.spriteBox(w, t);
-      const head = { x: x + size / 2 + HEAD_DX * (size / 16), y: y - 1 * s };
+      const b = this.spriteBox(w, t);
+      // just above the top of the head (head centre is SPRITE_HEAD; the head is ~5 units tall above it)
+      // (a Santa hat adds a good bit on top)
+      const hat = this.holiday === 'christmas' && !isNpc(w.id) ? 5 * CHAR_SCALE : 0;
+      const head = { x: b.hx, y: b.hy - (5 * CHAR_SCALE * ISO_ZSCALE + hat) * b.u };
       const isSel = this.sel.workerId === w.id || this.sel.sessionId === w.sessionId;
       const inSelRoom = roomSel !== null && w.room === roomSel;
 
@@ -1733,7 +1915,7 @@ export class OfficeRenderer {
       (c.w.status === 'waiting' ? 4e6 : 0) +
       (this.sel.workerId === c.w.id ? 2e6 : this.sel.sessionId === c.w.sessionId ? 1e6 : 0) +
       (roomSel && c.w.room === roomSel ? 5e5 : 0) +
-      c.w.y * 100 +
+      depthOf(c.w.x, c.w.y) * 100 + // front-most (screen depth)
       (c.w.isSub ? 0 : 1);
     const order = [...out].sort((a, b) => prio(b) - prio(a));
     const placed: Rect[] = [];
@@ -1887,31 +2069,48 @@ export class OfficeRenderer {
         if (c === 'V') {
           windows.set(y, [...(windows.get(y) ?? []), { x, ...windowGlass(this.map, x, y) }]);
         }
+        // Light sources sit where the glowing part is: a world point in the tile (art units, z up), stored
+        // as its plan position in tiles.
+        const at = (lx: number, ly: number, z: number): Tile => [x + (lx + leanU(z)) / 16, y + (ly + leanV(z)) / 16];
         if (c === 'J') {
           jukes.push([x, y]);
-          lights.push({ t: [x, y - 0.3], color: '255,80,200', r: 1.8 });
+          lights.push({ t: at(8, 15, 12), color: '255,80,200', r: 1.8 });
         }
-        // light sources sit where the glowing part is drawn (monitors and racks stand above their tile)
-        if (c === 'd') lights.push({ t: [x, y - 0.35], color: '120,200,255', r: 1.3 });
-        if (c === 'H') lights.push({ t: [x, y - 0.2], color: '79,240,255', r: 2 });
-        if (c === 'S') lights.push({ t: [x, y - 0.3], color: '90,230,140', r: 0.9 });
-        if (c === 'K') lights.push({ t: [x, y - 0.2], color: '255,170,90', r: 1.6 });
-        if (c === 'R') lights.push({ t: [x, y], color: '120,190,255', r: 1.2 });
+        if (c === 'd') lights.push({ t: at(8, 11, 11.5), color: '120,200,255', r: 1.3 });
+        if (c === 'H') lights.push({ t: at(8, 11.4, 8), color: '79,240,255', r: 2 });
+        if (c === 'S') lights.push({ t: at(8, 12, 10), color: '90,230,140', r: 0.9 });
+        if (c === 'K') lights.push({ t: at(8, 11, 7), color: '255,170,90', r: 1.6 });
+        if (c === 'R') lights.push({ t: at(8, 10, 5), color: '120,190,255', r: 1.2 });
       }
     return { racks, holos, jukes, windows, lights };
   }
 
-  /** Blinking rack LEDs and hologram shimmer for objects based in row `row`. */
+  /**
+   * Draw `draw` on a vertical face that looks toward +y (the lower left on screen), with the origin at
+   * plan-mode point (x, y): local x runs along the face, local y down it (like furniture.ts onPlane).
+   */
+  private onFrontFace(x: number, y: number, draw: () => void) {
+    const { ctx } = this;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.transform(1, 0, -SKEW, 1, 0, 0); // going down the face (−z) moves by (−SKEW, 1) in plan
+    draw();
+    ctx.restore();
+  }
+
+  /** Blinking rack LEDs and hologram shimmer for objects based in row `row` (plan mode). */
   private drawAnimatedRow(row: number, t: number) {
     const { ctx, scale: s } = this;
+    this.planMode();
     const colors = ['88,224,122', '242,209,61', '58,167,224', '232,83,74'];
     for (const [x, y] of this.animated.racks.get(row) ?? []) {
       RACK_LEDS.forEach(([lx, ly], i) => {
         const h = hash(x, y, i);
         const on = Math.floor(t / (180 + (h % 500)) + (h % 7)) % 3 !== 0;
-        // LED centred in its old 1x1 anchor cell
-        const cx = this.px(x) + (lx + 0.5) * s;
-        const cy = this.py(y) + (ly + 0.5) * s;
+        // LED centred in its 1x1 anchor cell, on the rack's front face
+        this.onFrontFace(this.px(x) + (lx + 0.5) * s, this.py(y) + (ly + 0.5) * s, () => {
+        const cx = 0;
+        const cy = 0;
         if (on) {
           const c = colors[h % 4];
           ctx.globalCompositeOperation = 'lighter';
@@ -1933,29 +2132,34 @@ export class OfficeRenderer {
           ctx.arc(cx, cy, 0.4 * s, 0, Math.PI * 2);
           ctx.fill();
         }
+        });
       });
     }
     if (this.evening)
       for (const [x, y] of this.animated.jukes.filter(([, jy]) => jy === row)) {
         const beat = Math.floor(t / BEAT_MS);
         const pulse = 1 - (t % BEAT_MS) / BEAT_MS;
+        // bands and record are on the jukebox's front face
         JUKE_BANDS.forEach(([jx, jy, jw, jh], i) => {
           const c = DISCO[(beat + i) % DISCO.length];
-          const bx = this.px(x) + jx * s;
-          const by = this.py(y) + jy * s;
-          ctx.globalCompositeOperation = 'lighter';
-          ctx.globalAlpha = 0.35 + 0.25 * pulse;
-          ctx.drawImage(glowSprite(c), bx - 1.5 * s, by - 1.2 * s, (jw + 3) * s, (jh + 2.4) * s);
-          ctx.globalAlpha = 1;
-          ctx.globalCompositeOperation = 'source-over';
-          ctx.fillStyle = `rgb(${c})`;
-          ctx.beginPath();
-          ctx.roundRect(bx, by, jw * s, jh * s, (jh / 2) * s);
-          ctx.fill();
+          this.onFrontFace(this.px(x) + jx * s, this.py(y) + jy * s, () => {
+            ctx.globalCompositeOperation = 'lighter';
+            ctx.globalAlpha = 0.35 + 0.25 * pulse;
+            ctx.drawImage(glowSprite(c), -1.5 * s, -1.2 * s, (jw + 3) * s, (jh + 2.4) * s);
+            ctx.globalAlpha = 1;
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.fillStyle = `rgb(${c})`;
+            ctx.beginPath();
+            ctx.roundRect(0, 0, jw * s, jh * s, (jh / 2) * s);
+            ctx.fill();
+          });
         });
         // spinning record label: a disc with a sweeping highlight wedge
-        const rcx = this.px(x) + JUKE_RECORD[0] * s;
-        const rcy = this.py(y) + JUKE_RECORD[1] * s;
+        ctx.save();
+        ctx.translate(this.px(x) + JUKE_RECORD[0] * s, this.py(y) + JUKE_RECORD[1] * s);
+        ctx.transform(1, 0, -SKEW, 1, 0, 0); // front face
+        const rcx = 0;
+        const rcy = 0;
         const rr = JUKE_RECORD[2] * s;
         ctx.fillStyle = beat % 2 ? '#e8534a' : '#f2d13d';
         ctx.beginPath();
@@ -1972,6 +2176,7 @@ export class OfficeRenderer {
         ctx.beginPath();
         ctx.arc(rcx, rcy, rr * 0.28, 0, Math.PI * 2);
         ctx.fill();
+        ctx.restore();
       }
     // Every couple of minutes the station makes a jump: stars stretch into streaks in every viewport.
     const JUMP_EVERY = 150_000;
@@ -1981,24 +2186,38 @@ export class OfficeRenderer {
       const p = since / JUMP_MS;
       const intensity = Math.sin(p * Math.PI); // build up, then settle
       for (const wdw of this.animated.windows.get(row) ?? []) {
-        const ox = this.px(wdw.x) + wdw.gx * s;
-        const oy = this.py(row) + wdw.gy * s;
+        // windowGlass() gives the glass's plan bounding box, and the glass is a parallelogram in it. Height
+        // h leans by (|SKEW|·h, h) in plan, so on a front wall (facing +y) the box is (x extent + |SKEW|·h)
+        // by h, and on a side wall (facing +x) it is |SKEW|·h by (y extent + h): the wider box is a front
+        // window. Work in the glass's own plane from here: local x along the window, local y down it, the
+        // glass is (0, 0) .. (lw, lh), and going down the glass moves by (−SKEW, 1) in plan.
+        const k = -SKEW;
+        const front = wdw.gw >= wdw.gh;
+        const lh = front ? wdw.gh : wdw.gw / k; // glass height
+        const lw = front ? wdw.gw - k * lh : wdw.gh - lh; // along the window
         ctx.save();
+        ctx.translate(this.px(wdw.x) + wdw.gx * s, this.py(row) + wdw.gy * s);
+        if (front) ctx.transform(1, 0, k, 1, 0, 0);
+        else ctx.transform(0, 1, k, 1, 0, 0);
+        const gw = lw;
+        const gh = lh;
+        const ox = 0;
+        const oy = 0;
         ctx.beginPath();
-        ctx.rect(ox, oy, wdw.gw * s, wdw.gh * s);
+        ctx.rect(ox, oy, gw * s, gh * s);
         ctx.clip();
         ctx.fillStyle = `rgba(40,60,120,${0.35 * intensity})`;
-        ctx.fillRect(ox, oy, wdw.gw * s, wdw.gh * s);
+        ctx.fillRect(ox, oy, gw * s, gh * s);
         ctx.globalCompositeOperation = 'lighter';
         // a soft blue-white flash in the glass at the peak of the jump
         ctx.globalAlpha = 0.35 * intensity;
-        ctx.drawImage(glowSprite('150,190,255'), ox - wdw.gw * 0.25 * s, oy - wdw.gh * 0.25 * s, wdw.gw * 1.5 * s, wdw.gh * 1.5 * s);
+        ctx.drawImage(glowSprite('150,190,255'), ox - gw * 0.25 * s, oy - gh * 0.25 * s, gw * 1.5 * s, gh * 1.5 * s);
         ctx.globalAlpha = 1;
         for (let i = 0; i < 6; i++) {
           const k = hash(wdw.x, row, i);
-          const ly = oy + ((k % 100) / 100) * wdw.gh * s;
+          const ly = oy + ((k % 100) / 100) * gh * s;
           const len = (4 + (k % 10)) * s * (0.4 + 2.6 * intensity);
-          const lx = ox + (((k >> 7) % 100) / 100) * wdw.gw * s - len / 2 + p * 6 * s;
+          const lx = ox + (((k >> 7) % 100) / 100) * gw * s - len / 2 + p * 6 * s;
           const th = Math.max(0.5, s * 0.32);
           // tapered streak: thin tail on the left, bright rounded head on the right
           ctx.fillStyle = i % 3 === 0 ? `rgba(190,220,255,${0.9 * intensity})` : `rgba(255,255,255,${0.75 * intensity})`;
@@ -2015,18 +2234,23 @@ export class OfficeRenderer {
     }
     for (const [x, y] of this.animated.holos.get(row) ?? []) {
       const a = 0.25 + 0.2 * Math.sin(t / 300 + x);
-      // a smooth scan band gliding down the light cone (same speed as before)
+      // A scan ring gliding down the light cone (same speed as before). The cone (furniture.ts 'H') stands
+      // on (8, 11.4) from z 2.6 to 16.6, widening from r 2.6 to 4.6; a level ring at height z is a circle
+      // in plan, shifted by the height lean.
       const scan = ((t / 120 + x) % 7) / 7;
-      const cx = this.px(x) + HOLO_SCAN.x * s;
-      const cy = this.py(y) + (HOLO_SCAN.top + scan * (HOLO_SCAN.bottom - HOLO_SCAN.top)) * s;
+      const z = 16.6 - scan * 14;
+      const r = (2.6 + (2 * (z - 2.6)) / 14) * s;
+      const cx = this.px(x) + (8 + leanU(z)) * s;
+      const cy = this.py(y) + (11.4 + leanV(z)) * s;
       ctx.globalCompositeOperation = 'lighter';
       ctx.globalAlpha = a;
-      ctx.drawImage(glowSprite('160,255,255'), cx - 4.5 * s, cy - 1.4 * s, 9 * s, 2.8 * s);
+      ctx.drawImage(glowSprite('160,255,255'), cx - r * 1.5, cy - r * 1.5, r * 3, r * 3);
       ctx.globalAlpha = Math.min(1, a * 1.6);
-      ctx.fillStyle = 'rgba(200,255,255,0.8)';
+      ctx.strokeStyle = 'rgba(200,255,255,0.8)';
+      ctx.lineWidth = 0.4 * s;
       ctx.beginPath();
-      ctx.roundRect(cx - 3 * s, cy - 0.2 * s, 6 * s, 0.4 * s, 0.2 * s);
-      ctx.fill();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
     }
@@ -2036,14 +2260,11 @@ export class OfficeRenderer {
   private drawParty(t: number) {
     const { ctx, map, scale: s } = this;
     const T = map.tileSize;
-    const [x0, y0, x1, y1] = map.rooms[CANTINA].rect;
-    const rx = this.px(x0 + 1);
-    const ry = this.py(y0 + 1);
-    const rw = this.px(x1) - rx;
-    const rh = this.py(y1) - ry;
+    const { x: rx, y: ry, w: rw, h: rh } = this.roomPlanRect(CANTINA, WALL_IN);
+    this.planMode();
     ctx.save();
     ctx.beginPath();
-    ctx.rect(rx, ry - WALL_RISE * s, rw, rh + WALL_RISE * s);
+    this.hullPath(rx, ry, rw, rh, WALL_RISE);
     ctx.clip();
     // dim the room a little so the lights pop
     ctx.fillStyle = 'rgba(20,0,40,0.18)';
@@ -2057,14 +2278,15 @@ export class OfficeRenderer {
       const cy = ry + rh * (0.5 + 0.35 * Math.sin(a * 1.3));
       const rad = T * s * (1.6 + 0.25 * (1 - beat));
       ctx.globalAlpha = 0.32;
-      // spots land on the floor in 3/4 view: slightly squashed ellipses
-      ctx.drawImage(glowSprite(color), cx - rad, cy - rad * 0.8, rad * 2, rad * 1.6);
+      // round spots on the floor (plan mode lays them flat)
+      ctx.drawImage(glowSprite(color), cx - rad, cy - rad, rad * 2, rad * 2);
     });
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
     ctx.restore();
 
     // music notes rising from each jukebox
+    this.screenMode();
     const fs = this.textSize(5, 10, 22);
     ctx.font = this.font(fs, 700);
     ctx.shadowColor = 'rgba(255,120,220,0.6)';
@@ -2072,8 +2294,7 @@ export class OfficeRenderer {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     for (const [jx, jy] of this.animated.jukes) {
-      const bx = this.px(jx + 0.5);
-      const by = this.py(jy) - 12 * s;
+      const [bx, by] = this.worldScreen(jx + 0.5, jy + 0.6, 17); // just above the jukebox's top
       for (let i = 0; i < 5; i++) {
         const period = 2600;
         const phase = (t / period + i / 5) % 1;
@@ -2106,13 +2327,17 @@ export class OfficeRenderer {
     if (dark <= 0) return;
     const { ctx, map, scale: s } = this;
     const T = map.tileSize;
+    // the whole map and everything standing on it
+    this.planMode();
     ctx.fillStyle = `rgba(8,12,40,${0.5 * dark})`;
-    ctx.fillRect(this.ox, this.oy - WALL_RISE * s, map.w * T * s, (map.h * T + WALL_RISE) * s);
-    // Screens, holograms and the coffee machine glow at night.
+    ctx.beginPath();
+    this.hullPath(0, 0, this.px(map.w), this.py(map.h), MAX_RISE);
+    ctx.fill();
+    // Screens, holograms and the coffee machine glow at night (round pools in plan, around the source).
     ctx.globalCompositeOperation = 'lighter';
     for (const { t: [x, y], color, r } of this.animated.lights) {
-      const cx = this.px(x + 0.5);
-      const cy = this.py(y + 0.4);
+      const cx = this.px(x);
+      const cy = this.py(y);
       const rad = r * T * s * (0.95 + 0.05 * Math.sin(t / 500 + x * 3));
       // cached sprite instead of a gradient per light per frame (same linear falloff)
       ctx.globalAlpha = 0.22 * dark;

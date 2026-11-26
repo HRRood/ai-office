@@ -131,15 +131,18 @@ function span(
   const l = map?.at(x - 1, y) === c;
   const r = map?.at(x + 1, y) === c;
   ctx.save();
+  // In plan space tall parts lean left by their height (mesh.ts), so a free end may reach ~MAX_RISE left of
+  // the tile, and a joined body must reach far enough into the neighbours to fill this tile's window at
+  // every height.
   if (l || r) {
-    const cx0 = l ? 0 : -4;
+    const cx0 = l ? 0 : -22;
     const cx1 = r ? 16 : 20;
     ctx.beginPath();
-    ctx.rect(cx0, -16, cx1 - cx0, 34);
+    ctx.rect(cx0, -22, cx1 - cx0, 40);
     ctx.clip();
   }
-  const x0 = l ? -6 : 0;
-  const x1 = r ? 22 : 16;
+  const x0 = l ? -26 : 0;
+  const x1 = r ? 42 : 16;
   draw(x0, x1 - x0, l, r);
   ctx.restore();
 }

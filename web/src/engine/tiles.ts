@@ -55,9 +55,17 @@ const SPACE = '#0b1026';
 /** Wall solid dimensions (art units). */
 const H = WALL_RISE;
 
+/** Extra room on the left of each strip: in plan space, height leans objects left by up to MAX_RISE. */
+export const STRIP_PAD = MAX_RISE;
+
+/**
+ * Both layers are in PLAN space (mesh.ts): draw them through the isometric transform (ISO_MATRIX).
+ *   floor      covers plan (0, 0) .. (w*T, h*T); draw it at plan (0, 0).
+ *   strips[y]  covers plan (-STRIP_PAD, y*T - MAX_RISE) .. (w*T, (y+1)*T); draw it at that top-left.
+ * Draw the strips in row order, each row's characters right after it, for correct occlusion.
+ */
 export interface MapLayers {
   floor: HTMLCanvasElement;
-  /** strips[y] covers rows y-MAX_RISE/T .. y; draw it at (0, y*T - MAX_RISE). */
   strips: HTMLCanvasElement[];
 }
 
@@ -90,7 +98,7 @@ export function renderLayers(map: OfficeMap): MapLayers {
   const strips: HTMLCanvasElement[] = [];
   for (let y = 0; y < map.h; y++) {
     const strip = document.createElement('canvas');
-    strip.width = map.w * T * ART_RES;
+    strip.width = (STRIP_PAD + map.w * T) * ART_RES;
     strip.height = (T + MAX_RISE) * ART_RES;
     const sctx = strip.getContext('2d')!;
     sctx.scale(ART_RES, ART_RES);
@@ -98,7 +106,8 @@ export function renderLayers(map: OfficeMap): MapLayers {
       const c = map.at(x, y);
       if (!isObject(c)) continue;
       sctx.save();
-      sctx.translate(x * T, MAX_RISE); // (0,0) = tile top-left; objects may draw at negative y
+      // (0,0) = tile top-left in plan space; tall things lean up and to the left (by z) in plan space
+      sctx.translate(STRIP_PAD + x * T, MAX_RISE);
       if (isSolid(c)) drawWall(sctx, map, x, y);
       else drawFurniture(sctx, c, x, y, map);
       sctx.restore();
@@ -794,10 +803,13 @@ interface Outline {
 /** The wall's footprint on its tile: a central core plus an arm toward every joined neighbour. */
 function wallOutline(map: OfficeMap, x: number, y: number): Outline {
   const last = y === map.h - 1;
-  const U = joins(map.at(x, y - 1));
-  const D = joins(map.at(x, y + 1));
-  const L = joins(map.at(x - 1, y));
-  const R = joins(map.at(x + 1, y));
+  // off the map counts as open, so the outer hull is a clean slim wall (no arms into the void)
+  const inMap = (tx: number, ty: number) => tx >= 0 && ty >= 0 && tx < map.w && ty < map.h;
+  const J = (tx: number, ty: number) => inMap(tx, ty) && joins(map.at(tx, ty));
+  const U = J(x, y - 1);
+  const D = J(x, y + 1);
+  const L = J(x - 1, y);
+  const R = J(x + 1, y);
   const tU = U ? 0 : WA;
   const bD = D ? 16 : WB;
   const lL = L ? 0 : WA;

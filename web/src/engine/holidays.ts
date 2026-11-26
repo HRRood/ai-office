@@ -11,8 +11,8 @@
 import { hash, type OfficeMap, type Tile } from './map';
 import { WALL_IN, WALL_RISE } from './tiles';
 import { poly, shade, softShadow, type Pt } from './lowpoly';
-import { Mesh, project, SKEW, type V3 } from './mesh';
-import { HEAD_DX } from './sprites';
+import { CAM_YAW, Mesh, isoOf, project, SKEW, type V3 } from './mesh';
+import { CHAR_SCALE, SPRITE_HEAD, SPRITE_UNITS } from './sprites';
 
 export type Holiday = 'sinterklaas' | 'christmas' | null;
 
@@ -54,14 +54,24 @@ export function currentHoliday(now = new Date()): Holiday {
   return holidayFor(now);
 }
 
-/** Drawing context the decorations need from the renderer. */
+/**
+ * Drawing context the decorations need from the renderer.
+ *
+ * The decor art is plan-space (mesh.ts), like the baked map layers. During drawRow the renderer sets
+ * `ctx` to its plan transform (plan * s → device, through the isometric camera), so px()/py() return
+ * PLAN coordinates times s, with no camera offset: everything stamped or drawn at them lands on the
+ * iso map. During drawOverlay `ctx` has the identity transform and the overlay works in device pixels.
+ */
 export interface DecorView {
   ctx: CanvasRenderingContext2D;
-  /** One map pixel in device pixels. */
+  /** One art unit in device pixels (the zoom scale). */
   s: number;
   dpr: number;
+  /** Plan x of a tile column, times s (drawRow only). */
   px(tx: number): number;
+  /** Plan y of a tile row, times s (drawRow only). */
   py(ty: number): number;
+  /** Canvas size in device px. */
   width: number;
   height: number;
 }
@@ -244,7 +254,7 @@ export class HolidayDecor {
     }
   }
 
-  /** Over everything (but under name tags): snow during both holiday seasons. */
+  /** Over everything (but under name tags): snow during both holiday seasons, across the whole view (device px). */
   drawOverlay(h: Holiday, v: DecorView, t: number) {
     if (!h) return;
     const { ctx } = v;
@@ -642,9 +652,11 @@ const HAT_BOX: Box = [0, -8, 16, 12];
 
 function buildHat(flip: boolean): Mesh {
   const m = new Mesh(flip ? 7 : 6);
+  // turn the card to face the isometric camera: local x runs along the screen, local +y toward the viewer
+  m.rotateZ(-CAM_YAW);
   if (flip) m.translate(16, 0, 0).scale(-1, 1, 1);
   const red = '#d42a2a';
-  // A sprite has no depth: the hat lives in the y = 0 plane, so screen y = -z.
+  // A sprite has no depth: the hat lives in the local y = 0 plane, so (after the turn above) screen y = -z.
   m.push().translate(8.6, 0, -0.7).rotateY(0.45);
   m.cylinder(0, 0, 0, 3.9, 2.3, 3.6, 8, red, { ry: 0.42 });
   m.pop();
@@ -658,9 +670,14 @@ function buildHat(flip: boolean): Mesh {
   return m;
 }
 
-/** A Santa hat on a sprite whose box is (x, y, size), in device pixels. Mirrored when `flip`. */
+/**
+ * A Santa hat on a sprite whose box is (x, y, size) in device pixels (size = the drawn SPRITE_UNITS).
+ * Mirrored when `flip`. The hat is modelled around a head at (8, 4.4) of the old 16-unit sprite.
+ */
 export function santaHat(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, flip = false) {
-  const u = size / 16;
+  // the hat was modelled for a bigger head than the 3D figures have: shrink it to fit the scaled head
+  const k = CHAR_SCALE * 0.7;
+  const u = (size / SPRITE_UNITS) * k; // device px per hat unit
   const key = `${Math.round(size * 2)}:${flip ? 1 : 0}`;
   let c = hats.get(key);
   const [bx, by, bw, bh] = HAT_BOX;
@@ -672,11 +689,13 @@ export function santaHat(ctx: CanvasRenderingContext2D, x: number, y: number, si
     const g = c.getContext('2d')!;
     g.scale(c.width / bw, c.height / bh);
     g.translate(-bx, -by);
-    buildHat(flip).draw(g);
+    buildHat(flip).draw(g, 0, 0, isoOf);
     hats.set(key, c);
   }
-  // the hat box is built around a head at (8, 4.4); heads lean left with the camera skew
-  ctx.drawImage(c, x + (bx + HEAD_DX) * u, y + by * u, bw * u, bh * u);
+  const su = size / SPRITE_UNITS;
+  // hat-local (8, HAT_HEAD_Y) is the head centre: the brim (z ≈ -1) then rests on the crown
+  const HAT_HEAD_Y = 3.6;
+  ctx.drawImage(c, x + SPRITE_HEAD[0] * su + (bx - 8) * u, y + SPRITE_HEAD[1] * su + (by - HAT_HEAD_Y) * u, bw * u, bh * u);
 }
 
 // ---------- wall-attached decor (follows the wall caps in tiles.ts) ----------

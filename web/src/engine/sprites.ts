@@ -2,17 +2,22 @@
 // Each figure is a real mesh (mesh.ts): a lathed, faceted head, a tapered bevelled torso, low-sided
 // cylinder limbs that swing for walking and typing, block hands/feet, and accessories as primitives.
 // Every direction is the same mesh yawed around its vertical axis (no mirroring), lit by true 3D normals
-// and drawn with the office's oblique camera. Baked into a 16 x 16 art-unit canvas (feet near y = 15)
-// once per (archetype, color, skin, direction, frame) and cached.
+// and drawn upright through the office's isometric camera. Baked into a SPRITE_UNITS-square art-unit
+// canvas (feet at SPRITE_FEET) once per (archetype, color, skin, direction, frame) and cached.
 import { ART_RES, mix } from './lowpoly';
-import { Mesh, SKEW, type V3 } from './mesh';
+import { ISO_ZSCALE, Mesh, isoOf, type P2, type V3 } from './mesh';
 
 export type Dir = 'down' | 'up' | 'left' | 'right';
 /** 0 = standing, 1/2 = walk cycle, 3/4 = typing (left / right hand on the keyboard). */
 export type Frame = 0 | 1 | 2 | 3 | 4;
-export const ARCHETYPES = ['pilot', 'droid', 'mystic', 'alien', 'engineer'] as const;
-/** Random archetypes for sessions, plus the Sinterklaas visitors (holiday NPCs): 'sint' and 'piet' (roetveegpiet). */
-export type Archetype = (typeof ARCHETYPES)[number] | 'sint' | 'piet' | 'boss' | 'captain';
+/** What sessions (the agents) look like: every agent is an astromech droid, tinted in its session colour. */
+export const ARCHETYPES = ['astromech'] as const;
+/**
+ * Every figure type. The agents use ARCHETYPES; 'boss' is the Manager (a dark armoured lord), 'captain' is
+ * you, 'pilot' the guard, and 'sint' / 'piet' (roetveegpiet) the Sinterklaas visitors. 'droid', 'mystic',
+ * 'alien' and 'engineer' are the earlier agent looks, kept available.
+ */
+export type Archetype = (typeof ARCHETYPES)[number] | 'pilot' | 'droid' | 'mystic' | 'alien' | 'engineer' | 'sint' | 'piet' | 'boss' | 'captain';
 
 /** Session colors, indexed by SessionState.color (server keeps them distinct). */
 export const SESSION_COLORS = [
@@ -33,25 +38,35 @@ export interface Look {
 
 const cache = new Map<string, HTMLCanvasElement>();
 
-// ---- camera placement inside the 16 x 16 sprite box ----
-/** Head centre height (world z) when standing. */
+// ---- camera placement inside the sprite box ----
+/** Head centre height (world z, before CHAR_SCALE) when standing. */
 const HEAD_Z = 9.6;
-/** Screen y of the floor point under the figure (the toes reach about y = 15). */
-const OY = 14;
-/** Screen x of the floor point: feet centred on the tile. */
-const OX = 8;
-/** The camera skews tall things left: the head centre sits this far (art units) left of the feet. */
-export const HEAD_DX = SKEW * HEAD_Z;
+/**
+ * Characters are modelled about 13 units tall; the camera foreshortens heights (ISO_ZSCALE), so they are
+ * scaled up to read well next to the furniture.
+ */
+export const CHAR_SCALE = 1.6;
+/** Sprite canvas size in screen art units (square). */
+export const SPRITE_UNITS = 24;
+/** Where the floor point under the figure sits inside the sprite (screen art units). */
+export const SPRITE_FEET: P2 = [12, 20.5];
+/** Head centre inside the sprite when standing (name tags, bubbles and hats anchor here). */
+export const SPRITE_HEAD: P2 = [SPRITE_FEET[0], SPRITE_FEET[1] - HEAD_Z * CHAR_SCALE * ISO_ZSCALE];
+
+const proj = (v: V3): P2 => {
+  const [sx, sy] = isoOf(v);
+  return [sx * CHAR_SCALE, sy * CHAR_SCALE];
+};
 
 export function getSprite(look: Look, dir: Dir, frame: Frame): HTMLCanvasElement {
   const key = `${look.archetype}|${look.color}|${look.skin}|${dir}|${frame}`;
   let c = cache.get(key);
   if (!c) {
     c = document.createElement('canvas');
-    c.width = c.height = 16 * ART_RES; // drawn in 16 x 16 art units at ART_RES px each
+    c.width = c.height = SPRITE_UNITS * ART_RES;
     const ctx = c.getContext('2d')!;
     ctx.scale(ART_RES, ART_RES);
-    buildCharacter(look, dir, frame).draw(ctx, OX, OY);
+    buildCharacter(look, dir, frame).draw(ctx, SPRITE_FEET[0], SPRITE_FEET[1], proj);
     cache.set(key, c);
   }
   return c;
@@ -87,7 +102,7 @@ function buildCharacter(look: Look, dir: Dir, drawFrame: Frame): Mesh {
   const metal = '#b8c0cc';
   const gold = '#e5b83b';
   const boots = '#2a2a33';
-  const body = a === 'droid' ? metal : a === 'mystic' ? CLOAK : color;
+  const body = a === 'droid' ? metal : a === 'mystic' ? CLOAK : a === 'boss' ? '#121217' : color;
   const pants =
     a === 'droid' ? sh(metal, -0.35) : a === 'engineer' ? sh(color, -0.35) : a === 'piet' ? '#f2d13d' : a === 'captain' ? '#1d2b4a' : sh(color, -0.45);
   const skin = a === 'alien' ? ALIEN_SKINS[Math.max(0, SKINS.indexOf(look.skin)) % ALIEN_SKINS.length] : a === 'droid' ? metal : look.skin;
@@ -96,19 +111,30 @@ function buildCharacter(look: Look, dir: Dir, drawFrame: Frame): Mesh {
   const sleeve = sh(body, -0.08);
 
   const yaw = YAW[dir];
-  /** World y of a local point (how near the viewer it ends up), used to layer head attachments. */
-  const wy = (x: number, y: number) => Math.sin(yaw) * x + Math.cos(yaw) * y;
+  /**
+   * How far toward the viewer a local point ends up (the isometric camera looks from +x +y), used to
+   * layer head attachments.
+   */
+  const wy = (x: number, y: number) => {
+    const X = Math.cos(yaw) * x - Math.sin(yaw) * y;
+    const Y = Math.sin(yaw) * x + Math.cos(yaw) * y;
+    return (X + Y) / Math.SQRT2;
+  };
 
   // walking: legs and arms swing; the hips drop a touch so the swinging feet stay on the floor
   const swing = frame === 1 ? 0.42 : frame === 2 ? -0.42 : 0;
   const HIP = 3.4;
   const drop = robed ? (frame ? 0.25 : 0) : HIP * (1 - Math.cos(swing));
   m.rotateZ(yaw);
+  if (a === 'astromech') {
+    astromech(m, color, drawFrame);
+    return m;
+  }
   m.translate(0, 0, -drop);
 
   // ---- legs (or robe) ----
   if (robed) {
-    const hem = a === 'sint' ? color : a === 'boss' ? '#7a1424' : '#5a4632';
+    const hem = a === 'sint' ? color : a === 'boss' ? '#0d0d11' : '#5a4632';
     for (const s of [-1, 1]) {
       const step = frame === 0 ? 0 : (s < 0) === (frame === 1) ? 0.7 : -0.5;
       const lift = step < 0 ? 0.25 : 0;
@@ -145,8 +171,8 @@ function buildCharacter(look: Look, dir: Dir, drawFrame: Frame): Mesh {
   // ---- the manager's cape (frames 1/2 = swaying) ----
   if (a === 'boss') {
     const sw = frame === 1 ? 0.8 : frame === 2 ? -0.8 : 0;
-    const capeC = '#0c0c10';
-    const lining = '#a01830';
+    const capeC = '#0a0a0d';
+    const lining = '#16161c';
     // face 0 = bottom, 1 = top, then the sides: index 4 faces the body (+y): the red lining
     const cols = (i: number) => (i === 4 ? lining : capeC);
     // two panels meeting in a fold down the middle of the back
@@ -168,7 +194,7 @@ function buildCharacter(look: Look, dir: Dir, drawFrame: Frame): Mesh {
   /** Front surface (local y) of the torso at height z. */
   const tf = (z: number) => radiusAt(torso, z) * 0.924 * TRY;
   const belt =
-    a === 'engineer' ? '#7a5230' : a === 'captain' ? '#1d2b4a' : a === 'sint' ? '#f4f6fa' : a === 'boss' ? '#5a0d18' : a === 'mystic' ? color : sh(color, -0.4);
+    a === 'engineer' ? '#7a5230' : a === 'captain' ? '#1d2b4a' : a === 'sint' ? '#f4f6fa' : a === 'boss' ? '#8d939d' : a === 'mystic' ? color : sh(color, -0.4);
   m.lathe(0, 0, torso, 8, body, { ry: TRY, bands: [robed ? body : pants, belt, body, body, sh(body, 0.06)] });
   /** A small plate stuck on the torso front at height z (centre), x offset. */
   const chest = (x: number, z: number, w: number, h: number, c: string, o: { emissive?: boolean; d?: number } = {}) => {
@@ -241,9 +267,16 @@ function buildCharacter(look: Look, dir: Dir, drawFrame: Frame): Mesh {
       chest(0.85, 5.0, 0.45, 0.45, gold, { d: 0.4 });
       break;
     case 'boss':
-      for (const s of [-1, 1]) m.box(s * 2.5 - 1.3, -1.0, 6.5, 2.6, 2.0, 1.0, '#2e3038', { bevel: 0.35, chamfer: 0.3 }); // shoulder plates
-      chest(0, 6.0, 2.4, 1.6, sh(color, 0.18), { d: 0.35 });
-      chest(0, 6.0, 1.8, 0.3, '#ff3344', { emissive: true, d: 0.45 });
+      for (const s of [-1, 1]) m.box(s * 2.5 - 1.3, -1.0, 6.5, 2.6, 2.0, 1.0, '#1b1c22', { bevel: 0.35, chamfer: 0.3 }); // shoulder armour
+      // the chest control box: a grey panel with rows of coloured buttons and slots
+      chest(0, 5.7, 2.2, 1.6, '#5c626c', { d: 0.4 });
+      chest(-0.55, 6.15, 0.45, 0.32, '#ff3344', { emissive: true, d: 0.55 });
+      chest(0.0, 6.15, 0.45, 0.32, '#3ad06a', { emissive: true, d: 0.55 });
+      chest(0.55, 6.15, 0.45, 0.32, '#4aa8ff', { emissive: true, d: 0.55 });
+      for (const x of [-0.6, -0.2, 0.2, 0.6]) chest(x, 5.45, 0.22, 0.7, '#2a2d33', { d: 0.5 });
+      // belt boxes either side of the buckle
+      for (const s of [-1, 1]) chest(s * 0.95, 4.0, 0.75, 0.75, '#8d939d', { d: 0.45 });
+      chest(0, 4.0, 0.6, 0.6, '#c9ced6', { d: 0.5 });
       break;
     case 'piet':
       chest(0, 5.6, 0.55, 0.55, gold, { d: 0.4 });
@@ -410,21 +443,29 @@ function buildCharacter(look: Look, dir: Dir, drawFrame: Frame): Mesh {
       break;
     }
     case 'boss': {
-      // original angular helmet: black plates, swept-back horn fins, a glowing red visor slit
-      const helm = '#1c1d24';
-      const edge = '#3a3c48';
+      // Darth Vader style: a glossy black dome helmet whose rim flares out over the shoulders at the back
+      // and sides, dark angled eye lenses, a nose ridge and a triangular mouth grille.
+      const helm = '#121216';
+      const gloss = '#24252d';
+      skull(helm, [sh(helm, -0.15), helm, helm, helm, gloss, sh(gloss, 0.08)]);
+      // the flared rim: a skirt from the temples down past the jaw (it drapes behind the face mask)
+      m.lathe(0, -0.45, [[R * 0.98, hz + 0.2 * RZ], [R * 1.05, hz - 0.35 * RZ], [R * 1.22, hz - 0.95 * RZ], [R * 1.25, hz - 1.08 * RZ]], 10, helm, {
+        ry: HRY * 1.05,
+        bands: [gloss, helm, sh(helm, -0.2)],
+        layer: HL - 0.05,
+        jitter: 0.03,
+      });
+      m.box(-0.22, -1.6, hz + RZ * 0.55, 0.44, 3.2, 0.5, gloss, { bevel: 0.2, layer: HL + 0.12 }); // crown ridge
+      // face mask: brow, angled lenses, nose ridge, cheek plates and the triangular grille
+      stick(0, 0.12, 2.6, 0.45, '#1d1e25', { d: 0.4 }); // brow
       for (const s of [-1, 1]) {
-        m.push().translate(s * 2.1, -0.4, hz + 0.9).rotateY(-s * 0.7).rotateX(-0.45);
-        m.cylinder(0, 0, 0, 0.75, 0, 2.5, 4, s < 0 ? edge : '#2a2b34', at(s * 2.5, -0.8));
-        m.pop();
+        stick(s * 0.36, -0.12, 1.25, 0.9, '#020204', { emissive: true, d: 0.42, tilt: s * 0.3 }); // eye lens
+        stick(s * 0.3, -0.04, 0.4, 0.2, '#8a92a6', { emissive: true, d: 0.48 }); // glint
+        stick(s * 0.72, -0.55, 1.0, 1.0, '#262832', { d: 0.36, tilt: s * 0.25 }); // cheek plate
       }
-      skull(helm, [sh(helm, -0.2), helm, helm, edge, helm, helm]);
-      m.box(-0.3, -2.0, hz + RZ * 0.6, 0.6, 3.6, 0.75, edge, { bevel: 0.25, layer: HL + 0.12 }); // ridge crest
-      for (const s of [-1, 1]) stick(s * 0.32, -0.02, 1.6, 0.5, '#ff2a3a', { emissive: true, d: 0.35, tilt: s * 0.2 });
-      stick(0, -0.06, 1.4, 0.3, '#ff8a94', { emissive: true, d: 0.42 });
-      stick(0, -0.6, 1.9, 0.85, '#121318', { d: 0.4 }); // grille
-      stick(0, -0.6, 0.25, 0.8, edge, { d: 0.46 });
-      for (const s of [-1, 1]) stick(s * 0.75, -0.55, 1.0, 1.0, edge, { d: 0.35 }); // cheek plates
+      stick(0, -0.3, 0.32, 0.8, '#2a2c36', { d: 0.5 }); // nose ridge
+      stick(0, -0.72, 1.3, 0.75, '#0b0b0f', { d: 0.45 }); // grille
+      for (const x of [-0.28, 0, 0.28]) stick(x * 0.6, -0.74, 0.12, 0.6, '#8d939d', { d: 0.5 }); // grille bars
       break;
     }
     case 'piet': {
@@ -497,4 +538,104 @@ function buildCharacter(look: Look, dir: Dir, drawFrame: Frame): Mesh {
 /** Identity helper so cape points read as plain tuples. */
 function rev(p: number[]): V3 {
   return [p[0], p[1], p[2]];
+}
+
+/**
+ * An R2-D2 style astromech droid: a white barrel body with panels in the session colour, a silver domed
+ * head with a big black eye lens, two side legs on shoulder hubs and a small centre foot. It rocks a little
+ * when it walks (frames 1/2) and reaches a small arm out to the keyboard when it types (frames 3/4).
+ * Built in the figure's local frame (front = +y), already yawed by the caller.
+ */
+function astromech(m: Mesh, color: string, frame: Frame) {
+  const white = '#e9edf3';
+  const silver = '#c3c9d3';
+  const panel = color;
+  const deep = sh(color, -0.35);
+  const dark = '#20242c';
+  const typing = frame === 3 || frame === 4;
+  const rock = frame === 1 ? 0.07 : frame === 2 ? -0.07 : 0;
+  const R = 2.55;
+  const ZB = 1.7; // bottom of the barrel
+  const ZT = 7.3; // top of the barrel (dome sits on it)
+
+  // ---- legs: outer struts with big feet, on shoulder hubs ----
+  for (const s of [-1, 1]) {
+    const lx = s * (R + 0.55);
+    m.box(lx - 0.95, -1.35, 0, 1.9, 2.7, 0.9, silver, { chamfer: 0.45, bevel: 0.3, jitter: 0.02 }); // foot
+    m.box(lx - 0.5, -0.55, 0.6, 1.0, 1.1, 0.5, dark, { jitter: 0.01 }); // ankle
+    m.box(lx - 0.7, -0.75, 1.0, 1.4, 1.5, 5.6, white, { chamfer: 0.35, bevel: 0.25, jitter: 0.02 }); // strut
+    m.box(lx - 0.25, 0.75, 2.0, 0.5, 0.12, 3.6, panel, { jitter: 0.01 }); // strut stripe
+    m.push().translate(lx, 0, 6.4).rotateY(Math.PI / 2);
+    m.cylinder(0, 0, -0.65, 1.15, 1.15, 1.3, 8, white, { jitter: 0.02 }); // shoulder hub
+    m.cylinder(0, 0, s > 0 ? 0.65 : -0.75, 0.7, 0.7, 0.1, 8, panel, { jitter: 0 });
+    m.pop();
+  }
+  // centre foot under the barrel
+  m.box(-0.8, -0.9, 0, 1.6, 1.8, 0.7, silver, { chamfer: 0.35, bevel: 0.2 });
+  m.cylinder(0, 0, 0.7, 0.55, 0.75, ZB - 0.6, 6, dark);
+
+  // ---- barrel body (rocks a touch while walking) ----
+  m.push().translate(0, 0, ZB).rotateX(rock).translate(0, 0, -ZB);
+  m.lathe(0, 0, [[R * 0.88, ZB], [R, ZB + 0.5], [R, ZT - 0.3], [R * 0.97, ZT]], 12, white, {
+    bands: [sh(white, -0.1), white, sh(white, 0.04)],
+    jitter: 0.015,
+  });
+  /** A panel on the barrel surface, facing angle ang (0 = front) at height z. */
+  const plate = (ang: number, z: number, w: number, h: number, c: string, o: { emissive?: boolean; d?: number } = {}) => {
+    const d = o.d ?? 0.22;
+    m.push().translate(0, 0, z).rotateZ(-ang).translate(0, R - 0.05, 0);
+    m.box(-w / 2, 0, -h / 2, w, d, h, c, { emissive: o.emissive, jitter: 0.01 });
+    m.pop();
+  };
+  // the front: a big vertical panel, vents and a couple of lights
+  plate(0, 4.9, 1.7, 3.4, panel);
+  plate(0, 4.9, 1.0, 2.5, deep, { d: 0.3 });
+  for (let i = 0; i < 3; i++) plate(0, 4.0 + i * 0.75, 0.75, 0.22, white, { d: 0.36 });
+  plate(-0.55, 5.9, 0.9, 1.3, panel);
+  plate(0.55, 5.9, 0.9, 1.3, panel);
+  plate(-0.55, 3.4, 0.8, 0.8, dark, { d: 0.26 });
+  plate(0.55, 3.4, 0.5, 0.5, '#ff4a3a', { emissive: true, d: 0.3 });
+  plate(0.35, 6.7, 0.35, 0.35, '#56d4ff', { emissive: true, d: 0.28 });
+  // the back and sides: panel bands so the session colour reads from every angle
+  for (const ang of [Math.PI, Math.PI * 0.7, -Math.PI * 0.7]) {
+    plate(ang, 5.6, 1.5, 2.4, panel);
+    plate(ang, 3.2, 1.2, 0.9, deep);
+  }
+  m.cylinder(0, 0, ZT - 0.35, R + 0.06, R + 0.06, 0.3, 12, silver, { jitter: 0 }); // collar ring
+
+  // ---- the little arm reaching out of the front hatch when typing ----
+  if (typing) {
+    const lift = frame === 3 ? 0.35 : -0.1;
+    m.push().translate(0.5, R - 0.2, 4.6 + lift).rotateX(-Math.PI / 2 + 0.25);
+    m.cylinder(0, 0, 0, 0.28, 0.24, 1.9, 6, silver, { jitter: 0.01 });
+    m.box(-0.35, -0.2, 1.8, 0.7, 0.4, 0.5, dark, { chamfer: 0.1 }); // gripper
+    m.pop();
+  }
+
+  // ---- domed head ----
+  const yawDome = frame === 1 ? 0.18 : frame === 2 ? -0.18 : 0; // looks around a little while walking
+  m.push().rotateZ(yawDome);
+  const dome: [number, number][] = [[R * 0.98, ZT], [R * 0.97, ZT + 0.55], [R * 0.86, ZT + 1.55], [R * 0.62, ZT + 2.35], [R * 0.3, ZT + 2.8], [0, ZT + 2.92]];
+  m.lathe(0, 0, dome, 12, silver, { bands: [panel, silver, sh(silver, 0.05), silver, sh(silver, 0.12)], jitter: 0.02 });
+  /** A part on the dome surface at angle ang (0 = front), at dome-relative height h (0..1). */
+  const onDome = (ang: number, t: number, w: number, hh: number, c: string, o: { emissive?: boolean; d?: number } = {}) => {
+    const z = ZT + 0.3 + t * 2.3;
+    const r = radiusAt(dome, z) - 0.08;
+    const d = o.d ?? 0.25;
+    m.push().translate(0, 0, z).rotateZ(-ang).translate(0, r, 0).rotateX(-t * 0.7);
+    m.box(-w / 2, 0, -hh / 2, w, d, hh, c, { emissive: o.emissive, jitter: 0.01 });
+    m.pop();
+  };
+  // the big eye: a black lens in a silver socket, with a glint
+  onDome(0.1, 0.45, 1.25, 1.1, '#6d7480', { d: 0.3 });
+  onDome(0.1, 0.45, 0.85, 0.75, '#0b0d12', { emissive: true, d: 0.4 });
+  onDome(0.0, 0.5, 0.22, 0.22, '#8fb0ff', { emissive: true, d: 0.48 });
+  // a red and blue indicator, and colour panels around the dome
+  onDome(-0.5, 0.25, 0.4, 0.4, '#ff4a3a', { emissive: true, d: 0.3 });
+  onDome(0.7, 0.35, 0.35, 0.35, '#56d4ff', { emissive: true, d: 0.3 });
+  for (const ang of [-1.1, 1.3, 2.3, -2.4, Math.PI]) onDome(ang, 0.4, 1.0, 0.9, panel);
+  onDome(-0.35, 0.7, 0.9, 0.55, panel);
+  m.cylinder(0, 0, ZT + 2.85, 0.55, 0.45, 0.25, 8, panel, { jitter: 0 }); // top cap
+  m.pop();
+  m.pop();
 }

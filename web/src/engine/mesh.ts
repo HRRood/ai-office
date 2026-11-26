@@ -1,14 +1,22 @@
 // Tiny low-poly 3D kit: build real meshes (boxes, bevelled extrusions, cylinders/cones, icospheres),
-// light every face by its true 3D normal and draw them with an oblique "2.5D" camera.
+// light every face by its true 3D normal and draw them with an angled orthographic camera.
 //
-// World axes (art units, 16 per tile):  x → right,  y → toward the viewer (screen down),  z ↑ up.
-// Projection: screen = (x + SKEW·z, y − z). The floor (z = 0) maps 1:1 onto the tile grid, so all
-// existing layout math stays valid; height rises up the screen exactly like the old MAX_RISE/WALL_RISE art.
-// SKEW < 0 tilts tops slightly left, so we look from the front-right and see the shaded right-hand faces.
-// That is what makes objects read as solids instead of flat front-on blocks.
+// World axes (art units, 16 per tile):  x → along the map's columns,  y → along its rows,  z ↑ up.
 //
-// Faces are flat-shaded: each one gets a single colour from its normal (warm light from the
-// top-left-front, cool shade on the far sides), plus a tiny per-face jitter so surfaces read as facets.
+// The camera is a true orthographic camera turned CAM_YAW around the vertical and tilted down, so the map
+// reads mostly level with the screen but you still see the sides of things. It works in two steps:
+//   1. project(): world → "plan" space, (x + SKEW·z, y − z). The floor (z = 0) maps 1:1 onto the tile
+//      grid, so baked layers and all tile-local art keep their simple grid coordinates, and things that
+//      stand up lean toward the top-left of the plan.
+//   2. ISO: an affine map plan → screen (a turn by CAM_YAW plus vertical foreshortening). Baked layers are
+//      drawn through it with ctx.transform(...ISO_MATRIX). The composite is
+//      screen = (x·cos − y·sin,  F·cos·(x·sin + y·cos) − F·z)    (F = ISO_ZSCALE)
+//      so heights point straight up the screen.
+// Because step 2 is affine, any 2D art drawn in plan space (glows, decals, stars) lands correctly too.
+// Sprites that must stay upright on screen (characters, hats) bake through both steps: isoOf().
+//
+// Faces are flat-shaded: each one gets a single colour from its normal (warm light from above and the
+// screen's upper left, cool shade on the far sides), plus a tiny per-face jitter so surfaces read as facets.
 
 import { mix, shade } from './lowpoly';
 
@@ -16,8 +24,32 @@ type Ctx = CanvasRenderingContext2D;
 export type V3 = [number, number, number];
 export type P2 = [number, number];
 
-export const SKEW = -0.15;
+/** How far the camera is turned from looking straight down the map's columns (radians). */
+export const CAM_YAW = (25 * Math.PI) / 180;
+const CY = Math.cos(CAM_YAW);
+const SY = Math.sin(CAM_YAW);
+/** Plan-space lean per unit of height, in x (y always shifts by −z). */
+export const SKEW = -Math.tan(CAM_YAW);
 export const ZK = 1;
+/** Screen units per unit of height (the camera's pitch makes it a true orthographic view). */
+export const ISO_ZSCALE = 1 / Math.sqrt(1 + CY * CY);
+
+/** Plan → screen, as canvas transform arguments (a, b, c, d, e, f). */
+export const ISO_MATRIX = [CY, ISO_ZSCALE * CY * SY, -SY, ISO_ZSCALE * CY * CY, 0, 0] as const;
+const [IA, IB, IC, ID] = ISO_MATRIX;
+const IDET = IA * ID - IB * IC;
+/** Plan → screen for one point. */
+export function iso(u: number, v: number): P2 {
+  return [IA * u + IC * v, IB * u + ID * v];
+}
+/** Screen → plan for one point (the inverse of iso()). */
+export function unIso(sx: number, sy: number): P2 {
+  return [(ID * sx - IC * sy) / IDET, (-IB * sx + IA * sy) / IDET];
+}
+/** World → screen, for sprites drawn upright on screen. */
+export function isoOf(v: V3): P2 {
+  return iso(v[0] + SKEW * v[2], v[1] - ZK * v[2]);
+}
 
 function norm(v: V3): V3 {
   const l = Math.hypot(v[0], v[1], v[2]) || 1;
@@ -28,8 +60,11 @@ const sub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 
 /** Direction toward the viewer (projection is constant along it). */
 export const VIEW: V3 = norm([-SKEW, ZK, 1]);
-/** Direction toward the light: above, from the left, slightly in front. */
-export const LIGHT3: V3 = norm([-0.45, 0.3, 0.84]);
+/**
+ * Direction toward the light: above and from the screen's upper left. Faces toward +y (lower left on
+ * screen) are lit, faces toward +x (lower right) are in shade, tops are brightest.
+ */
+export const LIGHT3: V3 = norm([-0.35, 0.5, 0.8]);
 
 const WARM = '#fff1d6';
 const COOL = '#141a2e';
@@ -429,8 +464,11 @@ export class Mesh {
 
   // ---- drawing ----
 
-  /** Draw at screen offset (ox, oy) in the context's current units (art units). */
-  draw(ctx: Ctx, ox = 0, oy = 0) {
+  /**
+   * Draw at offset (ox, oy) in the context's current units (art units). By default faces are projected
+   * to plan space (draw through ISO_MATRIX); pass `isoOf` to draw straight to an upright screen sprite.
+   */
+  draw(ctx: Ctx, ox = 0, oy = 0, proj: (v: V3) => P2 = project) {
     const items: { f: Face; n: V3; key: number; layer: number; fd: number }[] = [];
     for (let fi = 0; fi < this.faces.length; fi++) {
       const f = this.faces[fi];
@@ -472,7 +510,7 @@ export class Mesh {
       }
       ctx.beginPath();
       for (let k = 0; k < f.pts.length; k++) {
-        const [sx, sy] = project(f.pts[k]);
+        const [sx, sy] = proj(f.pts[k]);
         if (k === 0) ctx.moveTo(ox + sx, oy + sy);
         else ctx.lineTo(ox + sx, oy + sy);
       }
