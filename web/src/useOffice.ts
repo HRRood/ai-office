@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { LogEntry, PendingQuestion, Report, ServerMessage, SessionState } from '../../shared/types';
+import type { CostSummary, LogEntry, PendingQuestion, Report, ServerMessage, SessionState } from '../../shared/types';
 
 const PORT = Number(import.meta.env.VITE_OFFICE_PORT) || 4317;
 const WS_URL = `ws://127.0.0.1:${PORT}/ws`;
@@ -143,6 +143,8 @@ export interface OfficeData {
   reports: Report[];
   /** Questions from Claude waiting for your answer at the Manager, oldest first. */
   questions: PendingQuestion[];
+  /** Today's spend at API list prices (absent when the server has it turned off). */
+  cost?: CostSummary;
 }
 
 const CONNECT_TIMEOUT_MS = 4000; // give up on an attempt that hangs
@@ -250,7 +252,17 @@ function reduce(d: OfficeData, msg: ServerMessage): OfficeData {
   switch (msg.type) {
     case 'snapshot':
       if (msg.token) token = msg.token;
-      return { connected: true, conn: 'live', sessions: msg.sessions, log: msg.log, reports: msg.reports ?? d.reports, questions: msg.questions ?? [] };
+      return {
+        connected: true,
+        conn: 'live',
+        sessions: msg.sessions,
+        log: msg.log,
+        reports: msg.reports ?? d.reports,
+        questions: msg.questions ?? [],
+        cost: msg.cost ?? d.cost,
+      };
+    case 'cost':
+      return { ...d, cost: msg.cost };
     case 'questions':
       return { ...d, questions: msg.questions };
     case 'report': {

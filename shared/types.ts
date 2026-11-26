@@ -122,16 +122,31 @@ export interface LogEntry {
   room: RoomId;
 }
 
+/** What today's Claude usage would cost at API list prices (see server/costs.ts). */
+export interface CostSummary {
+  /** Local midnight the figure counts from (ms). */
+  day: number;
+  usd: number;
+  /** Responses counted. */
+  responses: number;
+  /** Dollars per model id. */
+  byModel: Record<string, number>;
+  /** Models seen today that have no price yet (their tokens aren't counted). */
+  unpriced: string[];
+}
+
 export type ServerMessage =
   /** `token` authorises POST /prompt; only sent to (localhost-only) WebSocket clients. */
   /** `reports` is only sent to WebSocket clients (not the /state debug endpoint). */
-  | { type: 'snapshot'; sessions: SessionState[]; log: LogEntry[]; token?: string; reports?: Report[]; questions?: PendingQuestion[] }
+  | { type: 'snapshot'; sessions: SessionState[]; log: LogEntry[]; token?: string; reports?: Report[]; questions?: PendingQuestion[]; cost?: CostSummary }
   /** The questions waiting at the Manager changed (all of them, oldest first). */
   | { type: 'questions'; questions: PendingQuestion[] }
   /** A new report arrived, or one changed (marked read). */
   | { type: 'report'; report: Report }
   /** The whole report list changed at once (all marked read, or read ones cleared). Newest first. */
   | { type: 'reports'; reports: Report[] }
+  /** Today's spend changed (worked out from Claude Code's transcripts). */
+  | { type: 'cost'; cost: CostSummary }
   | { type: 'session'; session: SessionState }
   | { type: 'remove'; id: string }
   | { type: 'log'; entry: LogEntry }

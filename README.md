@@ -76,6 +76,18 @@ the last 50 reports in memory only: they're gone when it restarts, and they aren
 You can also **reply** from an open report: your reply goes to that session's mailbox, like talking
 to the worker. Handy when Claude ended its turn with a question.
 
+**Mark all read** clears the unread count, and **Clear read** throws away the reports you've read.
+
+## Cost counter
+
+The header shows **💲 spent today**: what today's Claude Code usage would cost at Anthropic's API list
+prices, updated every few seconds. Hover it for the split per model. The server works it out from
+Claude Code's own transcripts in `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`): it reads only
+each response's model, timestamp and token counts, never the message content, and counts each response
+once. It resets at local midnight. On a Pro or Max subscription you aren't billed per token, so there
+the figure is the API-equivalent cost, not a bill. Prices live in `server/costs.ts`; models without a
+price are listed in the tooltip and not counted. Set `OFFICE_COSTS=0` to turn the counter off.
+
 ## Sleeping and waking
 
 Sessions that go quiet for 15 minutes don't leave any more: they go to bed in the **Sleeping

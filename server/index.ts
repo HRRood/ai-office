@@ -2,6 +2,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import express from 'express';
 import { createServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
+import { CostTracker } from './costs';
 import { Launcher } from './launcher';
 import { OfficeState, PROMPT_MAX_CHARS, REPORT_MAX_CHARS } from './state';
 import { ROOM_LABELS } from '../shared/rooms.config';
@@ -23,6 +24,9 @@ const TOKEN = randomBytes(24).toString('hex');
 
 const office = new OfficeState(broadcast);
 const launcher = new Launcher(office);
+/** Today's spend, from Claude Code's transcripts (OFFICE_COSTS=0 turns it off). */
+const costs = new CostTracker((cost) => broadcast({ type: 'cost', cost }));
+costs.start();
 const app = express();
 app.disable('x-powered-by');
 
@@ -253,7 +257,7 @@ wss.on('connection', (ws) => {
   alive.set(ws, true);
   ws.on('pong', () => alive.set(ws, true));
   ws.on('error', () => ws.terminate());
-  ws.send(JSON.stringify({ ...office.snapshot(true), token: TOKEN }));
+  ws.send(JSON.stringify({ ...office.snapshot(true), token: TOKEN, ...(process.env.OFFICE_COSTS === '0' ? {} : { cost: costs.summary() }) }));
 });
 setInterval(() => {
   for (const ws of wss.clients) {

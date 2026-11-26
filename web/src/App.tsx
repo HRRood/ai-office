@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { displayName, shorten } from '../../shared/names';
 import type { RoomId } from '../../shared/rooms.config';
+import type { CostSummary } from '../../shared/types';
 import { OfficeCanvas, type OfficeApi } from './components/OfficeCanvas';
 import { LaunchDialog } from './components/LaunchDialog';
 import { PromptDialog } from './components/PromptDialog';
@@ -59,10 +60,37 @@ function HolidayBadge({ api }: { api: React.MutableRefObject<OfficeApi | null> }
   );
 }
 
+/** Model ids like claude-opus-5-5 -> "Opus 5.5". */
+const modelName = (id: string) =>
+  id
+    .replace(/^claude-/, '')
+    .replace(/-(\d+)-(\d+).*$/, ' $1.$2')
+    .replace(/-(\d+)$/, ' $1')
+    .replace(/^\w/, (c) => c.toUpperCase());
+
+/** Today's spend so far, ticking up live; hover for the split per model. */
+function CostCounter({ cost }: { cost: CostSummary }) {
+  const usd = (n: number) => (n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`);
+  const split = Object.entries(cost.byModel)
+    .sort((a, b) => b[1] - a[1])
+    .map(([m, v]) => `${modelName(m)}: ${usd(v)}`)
+    .join('\n');
+  const title =
+    `Claude usage today at API list prices (${cost.responses} responses)` +
+    (split ? `\n${split}` : '') +
+    (cost.unpriced.length ? `\nNot counted (no price known): ${cost.unpriced.join(', ')}` : '') +
+    '\nOn a Pro/Max subscription you are not billed per token; this is the API-equivalent cost.';
+  return (
+    <span className="cost-counter" title={title} aria-label={`Spent today: ${usd(cost.usd)}`}>
+      💲{usd(cost.usd)} <span className="cost-label">today</span>
+    </span>
+  );
+}
+
 const NONE: Selection = { sessionId: null, workerId: null, roomId: null };
 
 export function App() {
-  const { connected, conn, sessions, log, reports, questions } = useOffice();
+  const { connected, conn, sessions, log, reports, questions, cost } = useOffice();
   /** The Manager's reports inbox is open. */
   const [readingReports, setReadingReports] = useState(false);
   const unreadReports = reports.filter((r) => !r.read).length;
@@ -175,6 +203,7 @@ export function App() {
         >
           📄 Reports{unreadReports ? ` (${unreadReports})` : ''}
         </button>
+        {cost && <CostCounter cost={cost} />}
         <HolidayBadge api={api} />
         <ShiftClock />
       </header>

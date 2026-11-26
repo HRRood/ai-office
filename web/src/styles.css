@@ -842,6 +842,19 @@ main {
 .reports-btn:focus-visible {
   outline: 2px solid var(--accent);
 }
+.cost-counter {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--text);
+  cursor: default;
+  white-space: nowrap;
+}
+.cost-counter .cost-label {
+  color: var(--muted);
+}
 .talk.reports {
   width: min(620px, calc(100% - 32px - 340px));
   max-height: calc(100% - 80px);
