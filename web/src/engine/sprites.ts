@@ -1,6 +1,11 @@
-// Procedural 16x16 pixel-art characters. Original sci-fi archetypes, tinted per session.
-// Sprites are drawn once per (archetype, color, skin, direction, frame) and cached.
-import { shade } from './tiles';
+// Procedural low-poly 3D characters. Original sci-fi archetypes, tinted per session.
+// Each figure is a real mesh (mesh.ts): a lathed, faceted head, a tapered bevelled torso, low-sided
+// cylinder limbs that swing for walking and typing, block hands/feet, and accessories as primitives.
+// Every direction is the same mesh yawed around its vertical axis (no mirroring), lit by true 3D normals
+// and drawn with the office's oblique camera. Baked into a 16 x 16 art-unit canvas (feet near y = 15)
+// once per (archetype, color, skin, direction, frame) and cached.
+import { ART_RES, mix } from './lowpoly';
+import { Mesh, SKEW, type V3 } from './mesh';
 
 export type Dir = 'down' | 'up' | 'left' | 'right';
 /** 0 = standing, 1/2 = walk cycle, 3/4 = typing (left / right hand on the keyboard). */
@@ -28,422 +33,468 @@ export interface Look {
 
 const cache = new Map<string, HTMLCanvasElement>();
 
+// ---- camera placement inside the 16 x 16 sprite box ----
+/** Head centre height (world z) when standing. */
+const HEAD_Z = 9.6;
+/** Screen y of the floor point under the figure (the toes reach about y = 15). */
+const OY = 14;
+/** Screen x of the floor point: feet centred on the tile. */
+const OX = 8;
+/** The camera skews tall things left: the head centre sits this far (art units) left of the feet. */
+export const HEAD_DX = SKEW * HEAD_Z;
+
 export function getSprite(look: Look, dir: Dir, frame: Frame): HTMLCanvasElement {
   const key = `${look.archetype}|${look.color}|${look.skin}|${dir}|${frame}`;
   let c = cache.get(key);
   if (!c) {
     c = document.createElement('canvas');
-    c.width = c.height = 16;
+    c.width = c.height = 16 * ART_RES; // drawn in 16 x 16 art units at ART_RES px each
     const ctx = c.getContext('2d')!;
-    if (dir === 'left') {
-      // left = mirrored right
-      ctx.translate(16, 0);
-      ctx.scale(-1, 1);
-    }
-    drawCharacter(ctx, look, dir === 'left' ? 'right' : dir, frame);
+    ctx.scale(ART_RES, ART_RES);
+    buildCharacter(look, dir, frame).draw(ctx, OX, OY);
     cache.set(key, c);
   }
   return c;
 }
 
-type P = (x: number, y: number, w: number, h: number, c: string) => void;
+/** Like lowpoly's shade(), but returns #rrggbb so the result can be shaded / lit again. */
+const sh = (hex: string, f: number) => (f >= 0 ? mix(hex, '#ffffff', f) : mix(hex, '#000000', -f));
 
-function drawCharacter(ctx: CanvasRenderingContext2D, look: Look, dir: 'down' | 'up' | 'right', drawFrame: Frame) {
-  const typing = drawFrame === 3 || drawFrame === 4;
-  const frame: 0 | 1 | 2 = typing ? 0 : drawFrame; // legs stand still while typing
-  const r: P = (x, y, w, h, c) => {
-    ctx.fillStyle = c;
-    ctx.fillRect(x, y, w, h);
-  };
+const YAW: Record<Dir, number> = { down: 0, up: Math.PI, right: -Math.PI / 2, left: Math.PI / 2 };
+
+/** Linear interpolation of a [r, z] profile's radius at height z. */
+function radiusAt(profile: [number, number][], z: number): number {
+  if (z <= profile[0][1]) return profile[0][0];
+  for (let i = 0; i + 1 < profile.length; i++) {
+    const [r0, z0] = profile[i];
+    const [r1, z1] = profile[i + 1];
+    if (z <= z1) return r0 + ((r1 - r0) * (z - z0)) / (z1 - z0 || 1);
+  }
+  return profile[profile.length - 1][0];
+}
+
+// ---------- the figure ----------
+// Local frame: the character faces +y (toward the viewer for 'down'), +x is its left hand side on screen,
+// z up, feet on z = 0.
+
+function buildCharacter(look: Look, dir: Dir, drawFrame: Frame): Mesh {
   const { archetype: a, color } = look;
-  const side = dir === 'right';
+  const seed = a.length * 7 + SESSION_COLORS.indexOf(color) + 3;
+  const m = new Mesh(seed);
+  const typing = drawFrame === 3 || drawFrame === 4;
+  const frame: 0 | 1 | 2 = typing ? 0 : drawFrame;
+
   const metal = '#b8c0cc';
-
-  const body = a === 'droid' ? metal : a === 'mystic' ? CLOAK : color;
-  const bodyDark = shade(body, -0.3);
-  const bodyLight = shade(body, 0.2);
-  const pants =
-    a === 'droid' ? shade(metal, -0.3) : a === 'engineer' ? shade(color, -0.35) : a === 'piet' ? '#f2d13d' : a === 'captain' ? '#1d2b4a' : shade(color, -0.45);
+  const gold = '#e5b83b';
   const boots = '#2a2a33';
+  const body = a === 'droid' ? metal : a === 'mystic' ? CLOAK : color;
+  const pants =
+    a === 'droid' ? sh(metal, -0.35) : a === 'engineer' ? sh(color, -0.35) : a === 'piet' ? '#f2d13d' : a === 'captain' ? '#1d2b4a' : sh(color, -0.45);
   const skin = a === 'alien' ? ALIEN_SKINS[Math.max(0, SKINS.indexOf(look.skin)) % ALIEN_SKINS.length] : a === 'droid' ? metal : look.skin;
-  const outline = 'rgba(15,18,28,0.85)';
+  const hand = a === 'pilot' ? '#3a3f4c' : a === 'boss' ? '#2e3038' : a === 'droid' ? sh(metal, -0.2) : skin;
+  const robed = a === 'mystic' || a === 'sint' || a === 'boss';
+  const sleeve = sh(body, -0.08);
 
-  // shadow
-  ctx.fillStyle = 'rgba(0,0,0,0.3)';
-  ctx.fillRect(4, 15, 8, 1);
-  ctx.fillRect(5, 14, 6, 1);
+  const yaw = YAW[dir];
+  /** World y of a local point (how near the viewer it ends up), used to layer head attachments. */
+  const wy = (x: number, y: number) => Math.sin(yaw) * x + Math.cos(yaw) * y;
 
-  // ---- the manager's cape, behind everything (frames 1/2 = swaying while he turns) ----
-  if (a === 'boss') {
-    const capeC = '#0c0c10';
-    const lining = '#a01830';
-    const sway = frame === 1 ? 1 : frame === 2 ? -1 : 0;
-    if (dir === 'up') {
-      r(3, 7, 10, 7, capeC);
-      r(3 + sway, 14, 10, 1, capeC);
-      r(3, 8, 1, 6, lining);
-      r(12, 8, 1, 6, lining);
-    } else if (side) {
-      r(2, 8, 4, 6, capeC);
-      r(1 + sway, 14, 5, 1, capeC);
-      r(5, 9, 1, 5, lining);
-    } else {
-      r(2, 8, 2, 6, capeC);
-      r(12, 8, 2, 6, capeC);
-      r(2 + sway, 14, 3, 1, capeC);
-      r(11 + sway, 14, 3, 1, capeC);
-      r(3, 9, 1, 5, lining);
-      r(12, 9, 1, 5, lining);
+  // walking: legs and arms swing; the hips drop a touch so the swinging feet stay on the floor
+  const swing = frame === 1 ? 0.42 : frame === 2 ? -0.42 : 0;
+  const HIP = 3.4;
+  const drop = robed ? (frame ? 0.25 : 0) : HIP * (1 - Math.cos(swing));
+  m.rotateZ(yaw);
+  m.translate(0, 0, -drop);
+
+  // ---- legs (or robe) ----
+  if (robed) {
+    const hem = a === 'sint' ? color : a === 'boss' ? '#7a1424' : '#5a4632';
+    for (const s of [-1, 1]) {
+      const step = frame === 0 ? 0 : (s < 0) === (frame === 1) ? 0.7 : -0.5;
+      const lift = step < 0 ? 0.25 : 0;
+      m.box(s * 1.15 - 0.8, -0.4 + step, drop + lift, 1.6, 2.2, 0.85, boots, { chamfer: 0.35, bevel: 0.3 });
+    }
+    const sw = frame === 1 ? 0.3 : frame === 2 ? -0.3 : 0;
+    m.push().translate(sw, 0, drop).rotateY(sw * 0.08);
+    const robe: [number, number][] = [[3.05, 0.5], [2.95, 1.3], [2.35, 4.4]];
+    m.lathe(0, -0.15, robe, 8, hem, { ry: 0.78, bands: [sh(hem, -0.12), hem] });
+    if (a === 'sint') {
+      // the white alb shows down the front where the red cope hangs open, with gold edging
+      const f = (z: number) => radiusAt(robe, z) * 0.924 * 0.78 - 0.15;
+      const strip = (w0: number, w1: number, c: string, d: number) =>
+        m.hexa(
+          [[-w0, f(0.55) - 0.1, 0.55], [w0, f(0.55) - 0.1, 0.55], [w0, f(0.55) + d, 0.55], [-w0, f(0.55) + d, 0.55]],
+          [[-w1, f(4.3) - 0.1, 4.3], [w1, f(4.3) - 0.1, 4.3], [w1, f(4.3) + d, 4.3], [-w1, f(4.3) + d, 4.3]],
+          c,
+          { jitter: 0.02 },
+        );
+      strip(1.5, 0.85, gold, 0.12);
+      strip(1.1, 0.6, '#f4f6fa', 0.22);
+    }
+    m.pop();
+  } else {
+    for (const s of [-1, 1]) {
+      const ang = s < 0 ? swing : -swing;
+      m.push().translate(s * 1.15, -0.15, HIP).rotateX(ang);
+      m.cylinder(0, 0, -HIP + 0.85, 0.78, 0.95, HIP - 0.55, 6, pants);
+      m.box(-0.82, -1.0, -HIP, 1.64, 2.0, 0.95, boots, { chamfer: 0.35, bevel: 0.3, jitter: 0.02 });
+      m.pop();
     }
   }
 
-  // ---- legs (or robe hem) ----
-  if (a === 'mystic' || a === 'sint' || a === 'boss') {
-    const hem = a === 'sint' ? '#f4f6fa' : a === 'boss' ? '#7a1424' : a === 'mystic' ? '#5a4632' : shade(color, -0.35);
-    r(4, 11, 8, 3, hem);
-    r(3, 13, 10, 1, hem);
-    if (frame === 1) r(4, 14, 3, 1, boots);
-    else if (frame === 2) r(9, 14, 3, 1, boots);
-    else {
-      r(5, 14, 2, 1, boots);
-      r(9, 14, 2, 1, boots);
+  // ---- the manager's cape (frames 1/2 = swaying) ----
+  if (a === 'boss') {
+    const sw = frame === 1 ? 0.8 : frame === 2 ? -0.8 : 0;
+    const capeC = '#0c0c10';
+    const lining = '#a01830';
+    // face 0 = bottom, 1 = top, then the sides: index 4 faces the body (+y): the red lining
+    const cols = (i: number) => (i === 4 ? lining : capeC);
+    // two panels meeting in a fold down the middle of the back
+    for (const s of [-1, 1]) {
+      const x = (v: number) => s * v;
+      const p = (pts: number[][]) => (s < 0 ? pts : [pts[1], pts[0], pts[3], pts[2]]).map(rev);
+      m.hexa(
+        p([[x(3.6) + sw, -2.0, 0.35], [sw, -2.75, 0.35], [sw, -2.3, 0.35], [x(3.4) + sw, -1.6, 0.35]]),
+        p([[x(2.6), -1.35, 7.2], [0, -1.75, 7.25], [0, -1.25, 7.35], [x(2.5), -0.85, 7.3]]),
+        cols,
+        { layer: dir === 'up' ? 0.5 : -0.5, jitter: 0.03 },
+      );
     }
-  } else if (side) {
-    if (frame === 0) {
-      r(6, 12, 4, 2, pants);
-      r(6, 14, 4, 1, boots);
-    } else {
-      const [front, back] = frame === 1 ? [9, 5] : [5, 9];
-      r(back, 12, 2, 2, shade(pants, -0.2));
-      r(back, 14, 2, 1, boots);
-      r(front, 12, 2, 2, pants);
-      r(front, 14, 2, 1, boots);
-      r(7, 12, 2, 1, pants);
-    }
-  } else {
-    const lUp = frame === 1 ? 1 : 0;
-    const rUp = frame === 2 ? 1 : 0;
-    r(5, 12, 2, 2 - lUp, pants);
-    r(5, 14 - lUp, 2, 1, boots);
-    r(9, 12, 2, 2 - rUp, pants);
-    r(9, 14 - rUp, 2, 1, boots);
   }
 
   // ---- torso ----
-  if (side) {
-    r(5, 8, 6, 4, body);
-    r(5, 8, 1, 4, bodyLight);
-    r(10, 8, 1, 4, bodyDark);
-  } else {
-    r(4, 8, 8, 4, body);
-    r(4, 8, 1, 4, bodyLight);
-    r(11, 8, 1, 4, bodyDark);
-  }
-  if (a === 'droid') {
-    r(6, 9, 4, 2, color); // chest panel in session color
-    r(4, 11, 8, 1, 'rgba(150,115,70,0.5)'); // dust from a long day
-    r(10, 8, 1, 1, '#8a4a2a'); // rust spot
-    r(7, 9, 1, 1, shade(color, 0.5));
-  } else if (a === 'engineer') {
-    r(4, 11, 8, 1, '#7a5230'); // tool belt
-    r(5, 9, 1, 1, 'rgba(40,30,20,0.45)'); // grease on the overalls
-    r(9, 11, 1, 1, '#d9d9d9');
-    if (dir === 'down') r(6, 8, 4, 1, '#e8e2d0');
-  } else if (a === 'mystic') {
-    r(side ? 5 : 4, 10, side ? 6 : 8, 1, color); // sash in the session color
-    if (dir === 'down') r(5, 8, 2, 2, '#c9b48a'); // layered tunic under the cloak
-  } else if (a === 'captain') {
-    // white uniform: gold epaulettes, gold buttons, navy belt
-    r(side ? 5 : 4, 11, side ? 6 : 8, 1, '#1d2b4a');
-    if (!side) {
-      r(3, 8, 2, 1, '#e5b83b');
-      r(11, 8, 2, 1, '#e5b83b');
-    }
-    if (dir === 'down') {
-      r(7, 8, 1, 3, '#d8dde6');
-      r(8, 9, 1, 1, '#e5b83b');
-      r(8, 10, 1, 1, '#e5b83b');
-    }
-  } else if (a === 'boss') {
-    // black armor: angular shoulder plates, crimson belt, a seam of red light down the front
-    r(side ? 5 : 4, 10, side ? 6 : 8, 1, '#5a0d18');
-    if (!side) {
-      r(3, 7, 3, 2, '#2e3038');
-      r(10, 7, 3, 2, '#2e3038');
-      r(3, 7, 3, 1, '#4a4e5a');
-      r(10, 7, 3, 1, '#4a4e5a');
+  const torso: [number, number][] = [[1.95, 3.0], [2.25, 3.75], [2.35, 4.25], [2.7, 6.1], [2.5, 7.0], [1.45, 7.7]];
+  const TRY = 0.74;
+  /** Front surface (local y) of the torso at height z. */
+  const tf = (z: number) => radiusAt(torso, z) * 0.924 * TRY;
+  const belt =
+    a === 'engineer' ? '#7a5230' : a === 'captain' ? '#1d2b4a' : a === 'sint' ? '#f4f6fa' : a === 'boss' ? '#5a0d18' : a === 'mystic' ? color : sh(color, -0.4);
+  m.lathe(0, 0, torso, 8, body, { ry: TRY, bands: [robed ? body : pants, belt, body, body, sh(body, 0.06)] });
+  /** A small plate stuck on the torso front at height z (centre), x offset. */
+  const chest = (x: number, z: number, w: number, h: number, c: string, o: { emissive?: boolean; d?: number } = {}) => {
+    const d = o.d ?? 0.3;
+    m.box(x - w / 2, tf(z) - d * 0.45, z - h / 2, w, d, h, c, { emissive: o.emissive, jitter: 0.015, chamfer: Math.min(w, d) * 0.25 });
+  };
+  /** Same on the back. */
+  const back = (x: number, z: number, w: number, h: number, c: string) => {
+    const d = 0.3;
+    m.box(x - w / 2, -tf(z) - d * 0.55, z - h / 2, w, d, h, c, { jitter: 0.015 });
+  };
+
+  // ---- arms ----
+  const SH_Z = 6.7;
+  for (const s of [-1, 1]) {
+    const cuff = a === 'pilot' || a === 'boss';
+    m.push().translate(s * 2.6, 0, SH_Z);
+    if (typing) {
+      // elbows out to the sides, forearms reaching forward to the keyboard; one hand lifts per frame
+      const lifted = (s < 0 && drawFrame === 3) || (s > 0 && drawFrame === 4);
+      m.rotateY(-s * 0.6).rotateX(0.3);
+      m.cylinder(0, 0, -1.7, 0.7, 0.8, 1.9, 6, sleeve);
+      m.translate(0, 0, -1.6).rotateY(s * 0.6).rotateX(lifted ? 2.15 : 1.45);
+      m.cylinder(0, 0, -1.7, 0.62, 0.72, 1.8, 6, sh(sleeve, 0.04));
+      if (cuff) m.cylinder(0, 0, -1.8, 0.72, 0.72, 0.55, 6, hand, { jitter: 0.02 });
+      m.ball(0, 0.05, -2.05, 0.72, 0.72, 0.68, hand, { jitter: 0.02 });
     } else {
-      r(6, 7, 4, 2, '#2e3038');
-      r(6, 7, 4, 1, '#4a4e5a');
+      m.rotateY(-s * 0.13).rotateX(s < 0 ? -swing * 0.9 : swing * 0.9);
+      m.cylinder(0, 0, -2.5, 0.62, 0.8, 2.9, 6, sleeve);
+      if (cuff) m.cylinder(0, 0, -2.6, 0.72, 0.72, 0.6, 6, hand, { jitter: 0.02 }); // glove cuff
+      m.ball(0, 0.05, -2.85, 0.72, 0.72, 0.68, hand, { jitter: 0.02 });
     }
-    if (dir === 'down') {
-      r(7, 8, 2, 4, shade(color, 0.15));
-      r(7, 9, 2, 1, '#ff3344'); // armor seam glow
-    }
-  } else if (a === 'piet') {
-    // velvet doublet with puffed sleeves and gold buttons, white ruff collar
-    if (dir === 'down') {
-      r(7, 9, 1, 1, '#e5b83b');
-      r(7, 11, 1, 1, '#e5b83b');
-    }
-    r(4, 11, 8, 1, shade(color, -0.35));
-    r(side ? 5 : 4, 7, side ? 6 : 8, 2, '#f4f6fa'); // kraag
-    r(side ? 5 : 4, 8, side ? 6 : 8, 1, '#d8dde6');
-  } else if (a === 'sint') {
-    r(side ? 5 : 4, 11, side ? 6 : 8, 1, '#f4f6fa'); // white trim
-    if (dir === 'down') r(7, 8, 2, 3, '#f4f6fa'); // stole
-    if (dir === 'down') r(7, 9, 2, 1, '#e5b83b');
-  } else if (a === 'pilot') {
-    r(4, 11, 8, 1, shade(color, -0.4));
-    if (dir === 'down') {
-      r(5, 8, 1, 3, '#3a3d45'); // dark utility harness straps
-      r(10, 8, 1, 3, '#3a3d45');
-      r(6, 9, 4, 1, '#3a3d45');
-    }
-    if (!side) {
-      r(4, 11, 2, 1, '#5a4a36'); // utility pouches
-      r(10, 11, 2, 1, '#5a4a36');
-    }
-  } else {
-    r(4, 11, 8, 1, shade(color, -0.4));
+    m.pop();
   }
 
-  // ---- arms (swing while walking) ----
-  const sway = frame === 0 ? 0 : 1;
-  const hand = a === 'pilot' ? '#3a3f4c' : skin;
-  if (side) {
-    const ay = 8 + (frame === 1 ? 1 : 0);
-    r(7, ay, 2, 3, bodyDark);
-    r(7, ay + 3, 2, 1, hand);
-  } else if (typing) {
-    // Arms reach forward to the keyboard; one hand lifts higher each frame.
-    const lUp = drawFrame === 3 ? 2 : 1;
-    const rUp = drawFrame === 4 ? 2 : 1;
-    r(3, 8, 1, 2, bodyDark);
-    r(4, 8 - lUp, 1, 2, bodyDark);
-    r(4, 7 - lUp, 1, 1, hand);
-    r(12, 8, 1, 2, bodyDark);
-    r(11, 8 - rUp, 1, 2, bodyDark);
-    r(11, 7 - rUp, 1, 1, hand);
-  } else {
-    const ly = 8 + (frame === 1 ? sway : 0);
-    const ry = 8 + (frame === 2 ? sway : 0);
-    r(3, ly, 1, 3, bodyDark);
-    r(3, ly + 3, 1, 1, hand);
-    r(12, ry, 1, 3, bodyDark);
-    r(12, ry + 3, 1, 1, hand);
+  // ---- shoulder / chest details ----
+  switch (a) {
+    case 'pilot':
+      for (const s of [-1, 1]) m.box(s * 1.55 - 0.3, tf(5.4) - 0.2, 4.6, 0.6, 0.35, 2.4, '#3a3d45', { jitter: 0.01 }); // harness straps
+      chest(0, 5.5, 3.2, 0.5, '#3a3d45');
+      chest(0, 5.5, 0.8, 0.8, '#9aa0aa', { d: 0.45 });
+      for (const s of [-1, 1]) {
+        m.box(s * 1.7 - 0.6, tf(3.9) - 0.3, 3.2, 1.2, 0.8, 1.1, '#5a4a36', { bevel: 0.2, chamfer: 0.2 }); // pouches
+      }
+      break;
+    case 'droid':
+      chest(0, 5.6, 2.8, 1.7, color, { d: 0.35 });
+      chest(-0.6, 5.85, 0.8, 0.5, sh(color, 0.55), { emissive: true, d: 0.45 });
+      chest(1.7, 6.5, 0.6, 0.5, '#8a4a2a', { d: 0.2 }); // a rust spot
+      for (let i = 0; i < 3; i++) back(0, 6.2 - i * 0.8, 2.8, 0.35, sh(metal, -0.35)); // vents
+      break;
+    case 'engineer':
+      chest(0, 7.0, 1.8, 0.7, '#e8e2d0'); // shirt collar
+      chest(1.0, 3.95, 0.5, 1.5, '#d9d9d9', { d: 0.4 }); // wrench in the tool belt
+      chest(-1.2, 5.6, 0.8, 0.7, '#4a3a2a', { d: 0.15 }); // grease
+      break;
+    case 'mystic':
+      m.hexa(
+        [[-2.2, tf(6.6) - 0.2, 6.5], [-1.5, tf(6.6) - 0.2, 6.9], [-1.5, tf(6.6) + 0.12, 6.9], [-2.2, tf(6.6) + 0.12, 6.5]],
+        [[1.6, tf(4.4) - 0.2, 4.0], [2.3, tf(4.4) - 0.2, 4.5], [2.3, tf(4.4) + 0.12, 4.5], [1.6, tf(4.4) + 0.12, 4.0]],
+        color,
+        { jitter: 0.02 },
+      ); // sash across the chest
+      chest(0, 6.8, 1.6, 0.9, '#c9b48a'); // layered tunic
+      break;
+    case 'captain':
+      for (const s of [-1, 1]) m.box(s * 2.6 - 1.0, -0.75, 6.8, 2.0, 1.5, 0.45, gold, { bevel: 0.15 }); // epaulettes
+      chest(0, 5.6, 0.45, 2.6, '#d8dde6');
+      chest(0.85, 6.0, 0.45, 0.45, gold, { d: 0.4 });
+      chest(0.85, 5.0, 0.45, 0.45, gold, { d: 0.4 });
+      break;
+    case 'boss':
+      for (const s of [-1, 1]) m.box(s * 2.5 - 1.3, -1.0, 6.5, 2.6, 2.0, 1.0, '#2e3038', { bevel: 0.35, chamfer: 0.3 }); // shoulder plates
+      chest(0, 6.0, 2.4, 1.6, sh(color, 0.18), { d: 0.35 });
+      chest(0, 6.0, 1.8, 0.3, '#ff3344', { emissive: true, d: 0.45 });
+      break;
+    case 'piet':
+      chest(0, 5.6, 0.55, 0.55, gold, { d: 0.4 });
+      chest(0, 4.8, 0.55, 0.55, gold, { d: 0.4 });
+      // white ruff collar
+      m.lathe(0, 0, [[1.4, 6.95], [2.9, 7.35], [2.75, 7.85], [1.3, 8.0]], 10, '#f4f6fa', { ry: 0.78, jitter: 0.05 });
+      break;
+    case 'sint':
+      chest(0, 5.4, 1.3, 3.6, '#f4f6fa'); // stole
+      chest(0, 5.8, 0.3, 1.7, gold, { d: 0.45 });
+      chest(0, 6.05, 1.1, 0.3, gold, { d: 0.45 });
+      break;
+    case 'alien':
+      chest(0, 6.2, 1.3, 0.5, sh(color, 0.35));
+      break;
   }
 
   // ---- head ----
+  const hz = HEAD_Z;
+  const HL = 1; // head parts draw over the body
+  /** Head attachments facing away from the camera tuck under the skull; the rest draw over it. */
+  const headLayer = (x: number, y: number, e = 0) => (wy(x, y) / (Math.hypot(x, y) || 1) < -0.2 ? HL - 0.1 - e : HL + 0.1 + e);
+  let R = 2.85;
+  let RZ = 2.2;
+  const HRY = 0.95;
+  let prof: [number, number][] = [[0, -1], [0.6, -0.84], [0.95, -0.32], [1.0, 0.18], [0.86, 0.62], [0.46, 0.92], [0, 1]];
+  if (a === 'alien') {
+    R = 2.95;
+    RZ = 2.45;
+    prof = [[0, -1], [0.45, -0.88], [0.78, -0.45], [0.98, 0.1], [1.0, 0.55], [0.62, 0.9], [0, 1]];
+  }
+  if (a === 'pilot' || a === 'boss') R = 3.0;
+  if (a === 'mystic') {
+    R = 3.1;
+    RZ = 2.3;
+  }
+  const headProf = (): [number, number][] => prof.map(([r, z]) => [r * R, hz + z * RZ]);
+  /** Distance from the head axis to its surface at relative height zr (-1..1) in direction ang (0 = front). */
+  const surf = (zr: number, ang: number) => {
+    const r = radiusAt(prof, zr) * R * 0.95;
+    const ax = r;
+    const ay = r * HRY;
+    return 1 / Math.hypot(Math.sin(ang) / ax, Math.cos(ang) / ay);
+  };
+  /**
+   * A feature stuck onto the head surface: ang turns it around the head (0 = front, + = toward +x),
+   * zr is relative height (-1..1). Built as a thin block so it culls and sorts like a real part.
+   */
+  const stick = (ang: number, zr: number, w: number, h: number, c: string, o: { emissive?: boolean; d?: number; out?: number; tilt?: number; e?: number } = {}) => {
+    const d = o.d ?? 0.3;
+    const dist = surf(zr, ang) + (o.out ?? 0);
+    m.push().translate(0, 0, hz + zr * RZ).rotateZ(-ang).translate(0, dist - d * 0.4, 0);
+    if (o.tilt) m.rotateY(o.tilt);
+    m.box(-w / 2, 0, -h / 2, w, d, h, c, { emissive: o.emissive, jitter: 0.015, layer: headLayer(Math.sin(ang), Math.cos(ang), o.e) });
+    m.pop();
+  };
+  const eyes = (zr: number, c = '#141414', w = 0.55, h = 0.75, spread = 0.4) => {
+    stick(-spread, zr, w, h, c, { emissive: true });
+    stick(spread, zr, w, h, c, { emissive: true });
+  };
+  const mouth = (zr: number, c = '#b04844') => stick(0, zr, 0.9, 0.3, c, { emissive: true, d: 0.25 });
+  const skull = (c: string, bands?: (string | undefined)[]) =>
+    m.lathe(0, 0, headProf(), 8, c, { ry: HRY, bands, layer: HL, jitter: 0.04 });
+  /** A cap of hair / helmet over the head from relative height zr upward, slightly larger than the head. */
+  const dome = (zr: number, grow: number, c: string, bands?: (string | undefined)[], ryk = 1) => {
+    const pts: [number, number][] = [[radiusAt(prof, zr) * R + grow, hz + zr * RZ]];
+    for (const [r, z] of prof) if (z > zr + 0.05) pts.push([r * R + (r > 0 ? grow : 0), hz + z * RZ + grow * 0.6]);
+    m.lathe(0, 0, pts, 8, c, { ry: HRY * ryk, bands, layer: HL + 0.05, jitter: 0.04 });
+  };
+  /**
+   * Hair over the back of the head: a slab hugging the skull's back, plus a cap over the crown.
+   * It draws over the skull only when the figure faces away; in profile it tucks under so just the
+   * part that sticks out behind the head shows.
+   */
+  const hair = (c: string, z0 = -0.6, bands?: string[], grow = 0.12) => {
+    const z1 = 0.3;
+    const ya = surf(z0, Math.PI) + 0.22;
+    const yb = surf(z1, Math.PI) + 0.24;
+    const za = hz + z0 * RZ;
+    const zb = hz + z1 * RZ;
+    m.hexa(
+      [[-1.5, -ya, za], [1.5, -ya, za], [2.3, -ya + 1.5, za], [-2.3, -ya + 1.5, za]],
+      [[-1.75, -yb, zb], [1.75, -yb, zb], [2.6, -yb + 1.5, zb], [-2.6, -yb + 1.5, zb]],
+      c,
+      { layer: wy(0, -1) > 0.5 ? HL + 0.1 : HL - 0.1, jitter: 0.04 },
+    );
+    dome(0.15, grow, c, bands);
+  };
+  /** A part on the head with an explicit layer from its local position. */
+  const at = (x: number, y: number) => ({ layer: headLayer(x, y) });
+
   switch (a) {
     case 'pilot': {
-      // original flight helmet: gunmetal shell, wraparound tinted visor, side antenna
+      // original flight helmet: gunmetal shell, a band in the session colour, wraparound visor, antenna
       const helm = '#6a6e78';
-      r(5, 1, 6, 7, helm);
-      r(4, 2, 8, 5, helm);
-      r(5, 1, 6, 1, shade(helm, 0.25));
-      r(4, 2, 8, 1, color); // thin band in the session color
-      r(12, 1, 1, 3, '#3a3d45'); // antenna
-      r(12, 0, 1, 1, '#9aa0aa');
-      r(9, 2, 1, 1, '#8a8e98'); // scuffed paint
-      if (dir === 'down') {
-        r(4, 4, 8, 2, '#1a2a2e');
-        r(5, 4, 2, 1, '#5fd4c8');
-      } else if (side) {
-        r(8, 4, 4, 2, '#1a2a2e');
-        r(10, 4, 1, 1, '#5fd4c8');
-      }
-      r(4, 6, 8, 1, shade(helm, -0.3));
+      skull(helm, [sh(helm, -0.3), helm, helm, color, helm, sh(helm, 0.08)]);
+      stick(-0.55, -0.12, 1.5, 1.45, '#1a2a2e', { d: 0.4 });
+      stick(0, -0.12, 1.9, 1.5, '#1a2a2e', { d: 0.4 });
+      stick(0.55, -0.12, 1.5, 1.45, '#1a2a2e', { d: 0.4 });
+      stick(-0.5, 0.02, 0.9, 0.45, '#5fd4c8', { emissive: true, d: 0.48 });
+      stick(0.05, -0.15, 0.35, 0.3, '#2f5458', { emissive: true, d: 0.48 });
+      m.push().translate(2.2, -0.6, hz + 1.0).rotateY(0.35);
+      m.cylinder(0, 0, 0, 0.22, 0.16, 2.4, 4, '#3a3d45', at(2.2, -0.6));
+      m.ball(0, 0, 2.5, 0.42, 0.42, 0.42, '#9aa0aa', at(2.2, -0.6));
+      m.pop();
+      m.cylinder(0, 0, hz - RZ - 0.3, 1.9, 2.1, 0.7, 8, sh(helm, -0.3), { ry: 0.8 }); // collar ring
       break;
     }
     case 'droid': {
-      r(5, 2, 6, 6, metal);
-      r(5, 2, 6, 1, shade(metal, 0.3));
-      r(5, 7, 6, 1, shade(metal, -0.25));
-      r(8, 0, 1, 2, '#7a8599'); // antenna
-      r(8, 0, 1, 1, color);
-      if (dir === 'down') {
-        r(6, 4, 4, 2, '#1a1f2b');
-        r(7, 4, 2, 1, '#4ff0ff');
-      } else if (side) {
-        r(8, 4, 3, 2, '#1a1f2b');
-        r(9, 4, 2, 1, '#4ff0ff');
-      } else {
-        r(6, 4, 4, 1, shade(metal, -0.2)); // vent
-        r(6, 6, 4, 1, shade(metal, -0.2));
-      }
+      const fy = 1.55; // front face
+      m.cylinder(0, 0, 7.3, 0.9, 0.9, 1.3, 6, '#5a6270'); // neck
+      m.box(-2.75, -fy, hz - 1.75, 5.5, fy * 2, 3.6, metal, { chamfer: 0.75, bevel: 0.55, layer: HL, jitter: 0.03 });
+      m.box(-2.15, fy - 0.15, hz - 1.0, 4.3, 0.4, 1.6, '#1a1f2b', { chamfer: 0.1, layer: headLayer(0, 1) });
+      m.box(-1.4, fy + 0.05, hz - 0.55, 2.8, 0.4, 0.55, '#4ff0ff', { emissive: true, layer: headLayer(0, 1, 0.05) });
+      for (const s of [-1, 1]) m.cylinder(s * 2.85, 0, hz - 0.9, 0.55, 0.55, 1.3, 6, sh(metal, -0.25), { ...at(s * 2.8, 0), jitter: 0.02 }); // ear bolts
+      m.box(-1.7, -fy - 0.2, hz - 1.1, 3.4, 0.4, 0.35, sh(metal, -0.35), at(0, -fy));
+      m.box(-1.7, -fy - 0.2, hz - 0.3, 3.4, 0.4, 0.35, sh(metal, -0.35), at(0, -fy));
+      m.cylinder(0, 0, hz + 1.7, 0.2, 0.15, 1.6, 4, '#7a8599', at(0, 0));
+      m.ball(0, 0, hz + 3.45, 0.55, 0.55, 0.55, color, { ...at(0, 0.5), emissive: false });
       break;
     }
     case 'mystic': {
-      const hood = shade(CLOAK, -0.1);
-      r(5, 1, 6, 7, hood);
-      r(4, 2, 8, 6, hood);
-      r(5, 1, 6, 1, shade(hood, 0.15));
-      if (dir === 'down') {
-        r(6, 4, 4, 3, shade(skin, -0.35));
-        r(6, 5, 1, 1, '#141414');
-        r(9, 5, 1, 1, '#141414');
-      } else if (side) {
-        r(9, 4, 2, 3, shade(skin, -0.35));
-        r(10, 5, 1, 1, '#141414');
-      }
+      const hood = sh(CLOAK, -0.1);
+      m.push().translate(0, -0.9, hz + 1.5).rotateX(-0.75);
+      m.cylinder(0, 0, 0, 1.4, 0, 2.0, 6, sh(hood, 0.05), at(0, -1.5)); // hood peak
+      m.pop();
+      skull(hood, [sh(hood, -0.25), hood, hood, hood, hood, sh(hood, 0.06)]);
+      stick(0, -0.22, 3.2, 2.7, '#2a2018', { d: 0.5 });
+      const fs = sh(skin, -0.35);
+      m.ball(0, surf(-0.25, 0) - 0.4, hz - 0.25 * RZ - 0.1, 1.35, 0.75, 1.0, fs, { layer: headLayer(0, 1, 0.05), jitter: 0.03 });
+      m.box(-1.05, surf(-0.25, 0) + 0.2, hz - 0.45, 0.5, 0.25, 0.45, '#141414', { emissive: true, layer: headLayer(-0.4, 1, 0.1) });
+      m.box(0.55, surf(-0.25, 0) + 0.2, hz - 0.45, 0.5, 0.25, 0.45, '#141414', { emissive: true, layer: headLayer(0.4, 1, 0.1) });
+      m.box(-0.35, -surf(0, Math.PI) - 0.15, hz - RZ, 0.7, 0.3, RZ * 1.8, sh(hood, -0.25), at(0, -1)); // seam
       break;
     }
     case 'alien': {
-      r(4, 2, 8, 6, skin);
-      r(5, 1, 6, 1, skin);
-      r(4, 2, 8, 1, shade(skin, 0.2));
-      // head ridges
-      r(6, 1, 1, 2, shade(skin, -0.25));
-      r(9, 1, 1, 2, shade(skin, -0.25));
-      // antennae
-      r(4, 0, 1, 2, shade(skin, -0.2));
-      r(11, 0, 1, 2, shade(skin, -0.2));
-      r(4, 0, 1, 1, '#f2d13d');
-      r(11, 0, 1, 1, '#f2d13d');
-      if (dir === 'down') {
-        r(5, 4, 2, 2, '#101418');
-        r(9, 4, 2, 2, '#101418');
-        r(5, 4, 1, 1, '#ffffff');
-        r(9, 4, 1, 1, '#ffffff');
-      } else if (side) {
-        r(9, 4, 2, 2, '#101418');
-        r(10, 4, 1, 1, '#ffffff');
+      const stalk = sh(skin, -0.2);
+      for (const s of [-1, 1]) {
+        m.push().translate(s * 1.3, -0.3, hz + RZ * 0.75).rotateY(s * 0.55).rotateX(-0.2);
+        m.cylinder(0, 0, 0, 0.26, 0.18, 2.1, 5, stalk, at(s * 1.6, -0.3));
+        m.ball(0, 0, 2.2, 0.55, 0.55, 0.55, '#f2d13d', { ...at(s * 2.4, -0.4), emissive: false });
+        m.pop();
       }
+      skull(skin, [sh(skin, -0.15), skin, skin, skin, skin, sh(skin, 0.05)]);
+      for (const s of [-1, 1]) {
+        stick(s * 0.45, -0.12, 1.35, 1.25, '#101418', { emissive: true, d: 0.35, tilt: s * 0.35 });
+        stick(s * 0.42, 0.0, 0.42, 0.38, '#ffffff', { emissive: true, d: 0.42 });
+      }
+      stick(0, -0.62, 0.6, 0.2, sh(skin, -0.45), { emissive: true, d: 0.2 });
       break;
     }
     case 'captain': {
       // you: navy peaked cap with a gold badge
-      r(5, 2, 6, 6, skin);
-      r(4, 1, 8, 2, '#1d2b4a');
-      r(5, 0, 6, 1, '#1d2b4a');
-      r(4, 1, 8, 1, '#2a3c66');
-      r(7, 1, 2, 1, '#e5b83b'); // badge
-      if (dir === 'down') {
-        r(4, 3, 8, 1, '#0e1526'); // brim
-        r(6, 5, 1, 1, '#141414');
-        r(9, 5, 1, 1, '#141414');
-        r(7, 7, 2, 1, '#c0504a');
-      } else if (side) {
-        r(8, 3, 5, 1, '#0e1526');
-        r(10, 5, 1, 1, '#141414');
-      } else {
-        r(5, 3, 6, 3, '#4a3020'); // hair under the cap
-      }
+      const navy = '#1d2b4a';
+      skull(skin);
+      hair('#4a3020', -0.6);
+      eyes(-0.2);
+      mouth(-0.62);
+      const cz = hz + 0.42 * RZ;
+      m.cylinder(0, 0, cz, R * 0.97, R * 1.04, 1.0, 8, navy, { ry: HRY, topColor: '#2c3f6c', layer: HL + 0.05, jitter: 0.03 });
+      m.cylinder(0, 0, cz - 0.05, R * 0.99, R * 0.99, 0.35, 8, '#0e1526', { ry: HRY, layer: HL + 0.06 }); // hat band
+      m.cylinder(0, 1.05, cz - 0.1, 2.0, 2.0, 0.22, 8, '#101830', { ry: 0.55, layer: headLayer(0, 1, 0.05) }); // brim
+      m.box(-0.35, surf(0.6, 0) * 0.97 + 0.05, cz + 0.3, 0.7, 0.3, 0.55, gold, { layer: headLayer(0, 1, 0.1), emissive: true });
       break;
     }
     case 'boss': {
       // original angular helmet: black plates, swept-back horn fins, a glowing red visor slit
       const helm = '#1c1d24';
       const edge = '#3a3c48';
-      r(5, 1, 6, 7, helm);
-      r(4, 2, 8, 5, helm);
-      r(5, 1, 6, 1, edge);
-      r(7, 0, 2, 2, edge); // ridge crest
-      // horn fins sweeping up and out
-      r(3, 2, 1, 3, helm);
-      r(2, 0, 1, 3, helm);
-      r(12, 2, 1, 3, helm);
-      r(13, 0, 1, 3, helm);
-      r(2, 0, 1, 1, edge);
-      r(13, 0, 1, 1, edge);
-      if (dir === 'down') {
-        r(5, 4, 6, 1, '#ff2a3a');
-        r(6, 4, 4, 1, '#ff8a94');
-        r(5, 6, 1, 1, edge); // cheek plates, angled
-        r(10, 6, 1, 1, edge);
-        r(6, 7, 4, 1, '#121318');
-      } else if (side) {
-        r(8, 4, 4, 1, '#ff2a3a');
-        r(10, 4, 1, 1, '#ff8a94');
-        r(10, 6, 2, 1, edge);
-      } else {
-        r(5, 3, 6, 1, edge);
-        r(6, 5, 4, 1, edge);
+      for (const s of [-1, 1]) {
+        m.push().translate(s * 2.1, -0.4, hz + 0.9).rotateY(-s * 0.7).rotateX(-0.45);
+        m.cylinder(0, 0, 0, 0.75, 0, 2.5, 4, s < 0 ? edge : '#2a2b34', at(s * 2.5, -0.8));
+        m.pop();
       }
+      skull(helm, [sh(helm, -0.2), helm, helm, edge, helm, helm]);
+      m.box(-0.3, -2.0, hz + RZ * 0.6, 0.6, 3.6, 0.75, edge, { bevel: 0.25, layer: HL + 0.12 }); // ridge crest
+      for (const s of [-1, 1]) stick(s * 0.32, -0.02, 1.6, 0.5, '#ff2a3a', { emissive: true, d: 0.35, tilt: s * 0.2 });
+      stick(0, -0.06, 1.4, 0.3, '#ff8a94', { emissive: true, d: 0.42 });
+      stick(0, -0.6, 1.9, 0.85, '#121318', { d: 0.4 }); // grille
+      stick(0, -0.6, 0.25, 0.8, edge, { d: 0.46 });
+      for (const s of [-1, 1]) stick(s * 0.75, -0.55, 1.0, 1.0, edge, { d: 0.35 }); // cheek plates
       break;
     }
     case 'piet': {
-      // roetveegpiet: own skin tone with a few soot smudges, beret with a feather
-      r(5, 2, 6, 6, skin);
-      const soot = 'rgba(40,36,36,0.75)';
-      if (dir === 'down') {
-        r(6, 4, 1, 1, '#141414');
-        r(9, 4, 1, 1, '#141414');
-        r(5, 5, 2, 1, soot); // cheek
-        r(9, 6, 1, 1, soot); // other cheek
-        r(7, 6, 1, 1, soot); // nose
-        r(7, 7, 2, 1, '#c0504a'); // smile
-      } else if (side) {
-        r(9, 4, 1, 1, '#141414');
-        r(8, 5, 2, 1, soot);
-        r(10, 6, 1, 1, soot);
-      } else {
-        r(5, 3, 6, 4, '#3b2a1e'); // hair from behind
-        r(6, 5, 2, 1, soot);
-      }
-      // beret, tilted, with a long feather
-      const cap = shade(color, -0.25);
-      r(4, 1, 8, 2, cap);
-      r(5, 0, 6, 1, cap);
-      r(4, 3, 8, 1, shade(cap, -0.3));
-      r(10, -1, 1, 2, '#f4f6fa');
-      r(11, -3, 1, 3, '#f4f6fa');
-      r(12, -4, 1, 2, '#e8e8e8');
+      // roetveegpiet: own skin tone with a few soot smudges, a beret with a feather
+      skull(skin);
+      hair('#3b2a1e', -0.55);
+      eyes(-0.15);
+      mouth(-0.6);
+      const soot = sh(skin, -0.5);
+      stick(-0.75, -0.5, 0.8, 0.5, soot, { d: 0.2 });
+      stick(0.85, -0.42, 0.6, 0.45, soot, { d: 0.2 });
+      stick(0, -0.35, 0.45, 0.35, soot, { d: 0.22 });
+      const cap = sh(color, -0.25);
+      m.push().translate(0.35, -0.15, hz + 0.45 * RZ).rotateY(-0.22);
+      m.lathe(0, 0, [[2.65, 0], [3.25, 0.4], [3.0, 0.85], [1.8, 1.25], [0, 1.4]], 10, cap, { ry: 0.9, bands: [sh(cap, -0.3)], layer: HL + 0.05, jitter: 0.04 });
+      m.pop();
+      // feather: two thin vanes swept up and back from the left side of the beret
+      m.push().translate(2.4, -0.7, hz + 0.5 * RZ + 0.6).rotateY(0.55).rotateX(-0.35);
+      m.box(-0.12, -0.45, 0, 0.24, 0.9, 2.6, '#f4f6fa', { chamfer: 0.08, ...at(2.8, -1) });
+      m.pop();
       break;
     }
     case 'sint': {
       // white beard, red mitre with a gold band, golden staff
-      r(5, 3, 6, 4, skin);
+      skull(skin);
+      hair('#f4f6fa', -0.75);
+      eyes(0.0, '#141414', 0.5, 0.6, 0.38);
+      m.ball(0, surf(-0.6, 0) - 0.65, hz - 1.6, 1.95, 1.3, 1.3, '#f4f6fa', { layer: headLayer(0, 1), jitter: 0.05 }); // beard
+      stick(0, -0.3, 2.0, 0.45, '#e4e8ef', { d: 0.45, out: 0.15, e: 0.05 }); // moustache
       const mitre = '#c8102e';
-      r(6, -1 + 1, 4, 1, mitre);
-      r(5, 1, 6, 2, mitre);
-      r(5, 3, 6, 1, '#e5b83b');
-      r(7, 0, 2, 3, '#e5b83b');
-      if (dir === 'down') {
-        r(6, 4, 1, 1, '#141414');
-        r(9, 4, 1, 1, '#141414');
-        r(5, 5, 6, 3, '#f4f6fa'); // beard
-        r(6, 8, 4, 1, '#f4f6fa');
-        r(7, 5, 2, 1, '#e4e8ef'); // moustache
-      } else if (side) {
-        r(9, 4, 1, 1, '#141414');
-        r(8, 5, 4, 3, '#f4f6fa');
-      } else {
-        r(5, 3, 6, 3, '#f4f6fa'); // hair from behind
+      const mz = hz + 0.25 * RZ;
+      const mp: [number, number][] = [[2.55, mz], [2.65, mz + 0.8], [2.2, mz + 2.0], [0.9, mz + 2.9]];
+      const MRY = 0.8;
+      m.lathe(0, 0, mp, 8, mitre, { ry: MRY, bands: [gold], layer: HL + 0.05, jitter: 0.04 });
+      const mf = (z: number) => radiusAt(mp, z) * 0.924 * MRY;
+      m.box(-0.3, mf(mz + 1.5) - 0.12, mz + 0.85, 0.6, 0.3, 1.4, gold, { layer: headLayer(0, 1, 0.05), jitter: 0.01 });
+      m.box(-0.7, mf(mz + 1.6) - 0.1, mz + 1.4, 1.4, 0.3, 0.4, gold, { layer: headLayer(0, 1, 0.05), jitter: 0.01 });
+      // staff with a crook, held on the right hand side
+      const sl = { layer: wy(3.4, 0.6) > 0.4 ? HL + 0.3 : 0 };
+      m.cylinder(3.4, 0.6, 0, 0.3, 0.3, 12.0, 6, gold, sl);
+      const crook: V3[] = [[3.4, 12.0, 0], [3.15, 12.9, 0], [2.5, 13.4, 0], [1.75, 13.3, 0], [1.4, 12.7, 0], [1.55, 12.1, 0]].map(([x, z]) => [x, 0.6, z] as V3);
+      for (let i = 0; i + 1 < crook.length; i++) {
+        const [x0, , z0] = crook[i];
+        const [x1, , z1] = crook[i + 1];
+        const len = Math.hypot(x1 - x0, z1 - z0);
+        m.push().translate(x0, 0.6, z0).rotateY(Math.atan2(x1 - x0, z1 - z0));
+        m.cylinder(0, 0, -0.1, 0.3, 0.3, len + 0.2, 6, sh(gold, 0.08), sl);
+        m.pop();
       }
-      // staff
-      const sx = side ? 12 : 13;
-      r(sx, 2, 1, 12, '#e5b83b');
-      r(sx - 1, 0, 2, 1, '#e5b83b');
-      r(sx - 2, 1, 1, 2, '#e5b83b');
       break;
     }
     case 'engineer': {
-      const hair = '#3b2a1e';
-      r(5, 2, 6, 6, skin);
-      if (dir === 'down') r(9, 6, 1, 1, 'rgba(40,30,20,0.55)'); // grease smudge
-      r(5, 1, 6, 2, hair);
-      r(4, 2, 1, 3, hair);
-      r(11, 2, 1, 3, hair);
-      if (dir === 'up') r(5, 2, 6, 4, hair);
-      r(4, 3, 8, 1, '#555b66'); // goggles strap
-      if (dir === 'down') {
-        r(5, 3, 2, 1, '#f2d13d');
-        r(9, 3, 2, 1, '#f2d13d');
-        r(6, 5, 1, 1, '#141414');
-        r(9, 5, 1, 1, '#141414');
-      } else if (side) {
-        r(9, 3, 2, 1, '#f2d13d');
-        r(10, 5, 1, 1, '#141414');
+      const hairC = '#3b2a1e';
+      skull(skin);
+      hair(hairC, -0.5, ['#555b66', hairC, hairC]);
+      eyes(-0.22);
+      mouth(-0.64);
+      stick(0.75, -0.6, 0.7, 0.5, sh(skin, -0.4), { d: 0.2 }); // grease smudge
+      for (const s of [-1, 1]) {
+        m.push().translate(0, 0, hz + 0.3 * RZ).rotateZ(-s * 0.38).translate(0, surf(0.3, 0) + 0.05, 0).rotateX(-Math.PI / 2);
+        m.cylinder(0, 0, 0, 0.72, 0.62, 0.65, 6, '#f2d13d', { ...at(s, 2), topColor: '#c9a520' });
+        m.pop();
       }
       break;
     }
   }
+  return m;
+}
 
-  // subtle outline under the head for readability
-  ctx.fillStyle = outline;
-  ctx.globalAlpha = 0.25;
-  ctx.fillRect(5, 8, 6, 1);
-  ctx.globalAlpha = 1;
+/** Identity helper so cape points read as plain tuples. */
+function rev(p: number[]): V3 {
+  return [p[0], p[1], p[2]];
 }

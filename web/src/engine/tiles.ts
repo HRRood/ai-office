@@ -1,12 +1,23 @@
-// Static office art in a 3/4 ("2.5D") perspective, generated in code.
+// Static office art, built as real low-poly 3D geometry (see mesh.ts) and baked once.
 //
 // Two layers:
-//   floor   – one canvas: floors, door thresholds, drop shadows, wall ambient occlusion
+//   floor   – one canvas: floors (low-relief panels, planks, carpets, grates), door thresholds,
+//             drop shadows and wall ambient occlusion.
 //   strips  – one canvas per tile row holding everything that stands up (walls, furniture).
 //             Objects extend upward past their tile, so the renderer draws strips row by row,
 //             interleaved with characters, to get correct occlusion (walk behind a desk, etc.).
+//
+// Walls are slim solids: a band 16 - 2·WALL_IN thick down the middle of their tile, with arms out to
+// neighbouring walls and doors, so runs join into one continuous wall and junctions become L/T/plus
+// shapes. Their tops are rounded off by two bevel steps on every exposed edge; the camera's skew shows
+// the right-hand side of every wall. The floor of the neighbouring room runs on under the gap.
 import type { RoomId } from '../../../shared/rooms.config';
 import { hash, type OfficeMap } from './map';
+import { drawFurniture } from './furniture';
+import { ART_RES, poly, shade, softShadow, type Pt } from './lowpoly';
+import { Mesh, SKEW, VIEW, project, type P2, type V3 } from './mesh';
+
+export { shade };
 
 type Ctx = CanvasRenderingContext2D;
 
@@ -17,25 +28,32 @@ export const WALL_RISE = 12;
 
 // A worn, lived-in station: muted metals, sand and rust tones.
 const FLOORS: Record<RoomId | 'hall', string> = {
-  library: '#4a3f33',
-  research: '#34444a',
-  serverRoom: '#262b35',
+  library: '#4a3d30',
+  research: '#33444a',
+  serverRoom: '#2a313c',
   mailroom: '#4a4436',
   reception: '#352f3c',
-  openOffice: '#4a4a4c',
-  workshop: '#2b303a',
-  whiteboard: '#423e48',
+  openOffice: '#4c4e56',
+  workshop: '#323845',
+  whiteboard: '#403c47',
   meeting: '#2e3440',
-  lounge: '#553834',
-  dorm: '#2f3548',
-  hall: '#4e4b46',
+  lounge: '#55372f',
+  dorm: '#2e3447',
+  hall: '#4a4843',
 };
 
-export function shade(hex: string, f: number): string {
-  const n = parseInt(hex.slice(1), 16);
-  const ch = (v: number) => Math.max(0, Math.min(255, Math.round(f >= 0 ? v + (255 - v) * f : v * (1 + f))));
-  return `rgb(${ch(n >> 16)},${ch((n >> 8) & 255)},${ch(n & 255)})`;
-}
+const BULKHEAD = '#3d3f46';
+const CAP = '#2a2c33';
+const HULL = '#272930';
+const FRAME = '#6c7488';
+const JAMB = '#56534c';
+const AMBER = '#ffb35a';
+const TEAL = '#5fd4e0';
+const HAZARD = '#d9a53a';
+const SPACE = '#0b1026';
+
+/** Wall solid dimensions (art units). */
+const H = WALL_RISE;
 
 export interface MapLayers {
   floor: HTMLCanvasElement;
@@ -43,30 +61,22 @@ export interface MapLayers {
   strips: HTMLCanvasElement[];
 }
 
-const isWallish = (c: string) => c === '#' || c === 'V';
+/** Tiles that are built as wall solids. The secret door is a wall panel people walk through. */
+const isSolid = (c: string) => c === '#' || c === 'V' || c === 'X';
 const isDoor = (c: string) => c === 'D' || c === 'E';
-/** Secret door: a walkable gap disguised as a wall panel (no hazard stripes). */
-const isSecret = (c: string) => c === 'X';
-const isObject = (c: string) => !'.DEX'.includes(c);
+const isObject = (c: string) => !'.DE'.includes(c);
 
 export function renderLayers(map: OfficeMap): MapLayers {
   const T = map.tileSize;
+  // Baked at ART_RES device px per art unit; all drawing code below works in art units.
   const floor = document.createElement('canvas');
-  floor.width = map.w * T;
-  floor.height = map.h * T;
+  floor.width = map.w * T * ART_RES;
+  floor.height = map.h * T * ART_RES;
   const fctx = floor.getContext('2d')!;
+  fctx.scale(ART_RES, ART_RES);
 
-  // 1) floors everywhere (walls get floor underneath too, mostly hidden)
-  for (let y = 0; y < map.h; y++)
-    for (let x = 0; x < map.w; x++) {
-      fctx.save();
-      fctx.translate(x * T, y * T);
-      const c = map.at(x, y);
-      if (isDoor(c)) drawDoorFloor(fctx, map, x, y, c === 'E');
-      else if (isSecret(c)) drawSecretDoorFloor(fctx);
-      else drawFloor(fctx, map, x, y);
-      fctx.restore();
-    }
+  // 1) floors: room by room, as continuous low-relief geometry
+  drawFloors(fctx, map);
   // 2) shadows / ambient occlusion on top of the floor
   for (let y = 0; y < map.h; y++)
     for (let x = 0; x < map.w; x++) {
@@ -80,16 +90,16 @@ export function renderLayers(map: OfficeMap): MapLayers {
   const strips: HTMLCanvasElement[] = [];
   for (let y = 0; y < map.h; y++) {
     const strip = document.createElement('canvas');
-    strip.width = map.w * T;
-    strip.height = T + MAX_RISE;
+    strip.width = map.w * T * ART_RES;
+    strip.height = (T + MAX_RISE) * ART_RES;
     const sctx = strip.getContext('2d')!;
+    sctx.scale(ART_RES, ART_RES);
     for (let x = 0; x < map.w; x++) {
       const c = map.at(x, y);
       if (!isObject(c)) continue;
       sctx.save();
       sctx.translate(x * T, MAX_RISE); // (0,0) = tile top-left; objects may draw at negative y
-      if (c === '#') drawWall(sctx, map, x, y);
-      else if (c === 'V') drawWindow(sctx, map, x, y);
+      if (isSolid(c)) drawWall(sctx, map, x, y);
       else drawFurniture(sctx, c, x, y, map);
       sctx.restore();
     }
@@ -98,500 +108,969 @@ export function renderLayers(map: OfficeMap): MapLayers {
   return { floor, strips };
 }
 
+/**
+ * Where a viewport's glass shows on screen, relative to its tile's top-left (art units), for overlays
+ * like the star-streak jump. Matches the geometry drawn by drawWall.
+ */
+export function windowGlass(map: OfficeMap, x: number, y: number): { gx: number; gy: number; gw: number; gh: number } {
+  const g = glassOf(map, x, y);
+  if (!g) return { gx: 0, gy: 0, gw: 0, gh: 0 };
+  const corners: V3[] =
+    g.kind === 'front'
+      ? [[g.x0, g.y, g.z0], [g.x1, g.y, g.z0], [g.x0, g.y, g.z1], [g.x1, g.y, g.z1]]
+      : [[g.x, g.y0, g.z0], [g.x, g.y1, g.z0], [g.x, g.y0, g.z1], [g.x, g.y1, g.z1]];
+  const ps = corners.map(project);
+  const xs = ps.map((p) => p[0]);
+  const ys = ps.map((p) => p[1]);
+  const gx = Math.min(...xs);
+  const gy = Math.min(...ys);
+  return { gx, gy, gw: Math.max(...xs) - gx, gh: Math.max(...ys) - gy };
+}
+
+// ---------------- 2D helpers (glows, stars) ----------------
+
 function r(ctx: Ctx, x: number, y: number, w: number, h: number, c: string) {
   ctx.fillStyle = c;
   ctx.fillRect(x, y, w, h);
 }
 
-/** A box seen from 3/4: top surface then front face. y = top of the box's top surface. */
-function box(ctx: Ctx, x: number, y: number, w: number, topH: number, faceH: number, top: string, front: string) {
-  r(ctx, x, y, w, topH, top);
-  r(ctx, x, y, w, 1, shade(top, 0.25)); // back edge highlight
-  r(ctx, x, y + topH, w, faceH, front);
-  r(ctx, x, y + topH, w, 1, shade(front, 0.2)); // front edge highlight
-  r(ctx, x, y + topH + faceH - 1, w, 1, shade(front, -0.35)); // base line
-  r(ctx, x + w - 1, y, 1, topH + faceH, 'rgba(0,0,0,0.18)'); // right side in shade
+function clipRect(ctx: Ctx, x: number, y: number, w: number, h: number) {
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.clip();
+}
+
+/** A soft round glow (for lamps and indicator lights). */
+function glow(ctx: Ctx, cx: number, cy: number, rad: number, rgb: string, a = 0.45) {
+  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
+  g.addColorStop(0, `rgba(${rgb},${a})`);
+  g.addColorStop(1, `rgba(${rgb},0)`);
+  ctx.fillStyle = g;
+  ctx.fillRect(cx - rad, cy - rad, rad * 2, rad * 2);
+}
+
+/** An irregular, soft-edged stain polygon (grime, oil, scuffs). */
+function stain(ctx: Ctx, seed: number, cx: number, cy: number, rad: number, fill: string) {
+  const pts: Pt[] = [];
+  const n = 6;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2 + (seed % 5) * 0.3;
+    const j = 0.65 + ((hash(seed, i) % 100) / 100) * 0.5;
+    pts.push([cx + Math.cos(a) * rad * j, cy + Math.sin(a) * rad * j * 0.7]);
+  }
+  poly(ctx, pts, fill);
+}
+
+/** Deep space inside a glass rect: faceted night sky, a faint nebula, diamond stars, maybe a planet. */
+function stars(ctx: Ctx, seed: number, x: number, y: number, w: number, h: number) {
+  ctx.save();
+  clipRect(ctx, x, y, w, h);
+  r(ctx, x, y, w, h, SPACE);
+  // low-poly sky: two big facets
+  poly(ctx, [[x, y], [x + w, y], [x + w * ((seed % 5) / 8 + 0.2), y + h]], '#0e1430');
+  poly(ctx, [[x + w, y + h * 0.3], [x + w, y + h], [x + w * 0.4, y + h]], '#0a0e22');
+  if (seed % 3 === 0) {
+    const nx = x + (seed % Math.max(1, Math.floor(w)));
+    const ny = y + ((seed >> 5) % Math.max(1, Math.floor(h)));
+    poly(ctx, [[nx - 4, ny], [nx, ny - 2.5], [nx + 5, ny - 1], [nx + 2, ny + 2.5], [nx - 3, ny + 2]], seed % 2 ? 'rgba(95,212,224,0.1)' : 'rgba(176,124,255,0.12)');
+  }
+  const count = Math.max(3, Math.round((w * h) / 22));
+  for (let i = 0; i < count; i++) {
+    const s = hash(seed, i);
+    const sx = x + 0.6 + ((s % 1000) / 1000) * (w - 1.2);
+    const sy = y + 0.6 + (((s >> 10) % 1000) / 1000) * (h - 1.2);
+    const sr = i === 0 ? 0.8 : 0.32 + ((s >> 20) % 3) * 0.12;
+    poly(ctx, [[sx, sy - sr], [sx + sr * 0.6, sy], [sx, sy + sr], [sx - sr * 0.6, sy]], i === 0 ? '#ffe9a8' : '#cfd8ff');
+  }
+  if (seed % 7 === 0 && w > 6 && h > 6) {
+    // a small rust planet, lit from the top-left
+    const cx = x + 4;
+    const cy = y + 3.5;
+    const pts: Pt[] = [];
+    for (let i = 0; i < 8; i++) pts.push([cx + Math.cos((i / 8) * Math.PI * 2) * 2, cy + Math.sin((i / 8) * Math.PI * 2) * 2]);
+    poly(ctx, pts, '#8a4f2a');
+    poly(ctx, [pts[4], pts[5], pts[6], pts[7], [cx + 0.3, cy + 0.3]], '#c0763c');
+    poly(ctx, [pts[0], pts[1], pts[2], [cx + 0.5, cy + 0.5]], '#5e3520');
+  }
+  // glass glint: one diagonal facet
+  const gx = x + w * 0.2;
+  poly(ctx, [[gx, y], [gx + 2.2, y], [gx - h * 0.35 + 2.2, y + h], [gx - h * 0.35, y + h]], 'rgba(255,255,255,0.05)');
+  ctx.restore();
+}
+
+// ---------------- 3D building blocks ----------------
+
+/** Chamfered rectangle outline (c = 0 gives the plain rectangle). */
+function octo(x0: number, y0: number, x1: number, y1: number, c: number): P2[] {
+  if (c <= 0.001) return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  return [[x0 + c, y0], [x1 - c, y0], [x1, y0 + c], [x1, y1 - c], [x1 - c, y1], [x0 + c, y1], [x0, y1 - c], [x0, y0 + c]];
+}
+
+/** Pseudo-random in [-1, 1] from any key. */
+function rnd(...k: Array<string | number>) {
+  return ((hash(...k) % 10007) / 10007) * 2 - 1;
+}
+
+/**
+ * A low-relief floor plate: sloped bevel facets from the outline (z0) up to an inset top (z0 + h), and
+ * the top triangulated as a fan around a slightly raised, off-centre hub, so it reads as facets.
+ */
+function facetPlate(
+  m: Mesh,
+  outer: P2[],
+  inner: P2[],
+  col: string,
+  o: { z0?: number; h?: number; dome?: number; seed?: number; layer?: number; jitter?: number } = {},
+) {
+  const z0 = o.z0 ?? 0;
+  const zt = z0 + (o.h ?? 0.35);
+  let cx = 0;
+  let cy = 0;
+  for (const [x, y] of inner) {
+    cx += x / inner.length;
+    cy += y / inner.length;
+  }
+  let minX = Infinity;
+  let maxX = -Infinity;
+  for (const [x] of inner) {
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+  }
+  const s = o.seed ?? 0;
+  const span = (maxX - minX) * 0.12;
+  const hub: V3 = [cx + rnd(s, 'hx') * span, cy + rnd(s, 'hy') * span * 0.7, zt + (o.dome ?? 0.12)];
+  const polys: V3[][] = [];
+  const n = outer.length;
+  for (let i = 0; i < n; i++) {
+    const a = outer[i];
+    const b = outer[(i + 1) % n];
+    const ia = inner[i];
+    const ib = inner[(i + 1) % n];
+    polys.push([[a[0], a[1], z0], [b[0], b[1], z0], [ib[0], ib[1], zt], [ia[0], ia[1], zt]]);
+    if (Math.hypot(ib[0] - ia[0], ib[1] - ia[1]) > 0.01) polys.push([[ia[0], ia[1], zt], [ib[0], ib[1], zt], hub]);
+  }
+  m.solid(polys, col, { jitter: o.jitter ?? 0.022, layer: o.layer });
+}
+
+/** A rectangular plate with chamfered corners. */
+function plate(
+  m: Mesh,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  col: string,
+  o: { z0?: number; h?: number; b?: number; c?: number; dome?: number; seed?: number; layer?: number; jitter?: number } = {},
+) {
+  const b = o.b ?? 0.8;
+  const c = Math.min(o.c ?? 1.2, (x1 - x0) / 3, (y1 - y0) / 3);
+  const ci = Math.max(0, c - b * 0.414);
+  facetPlate(m, octo(x0, y0, x1, y1, c), octo(x0 + b, y0 + b, x1 - b, y1 - b, ci), col, o);
+}
+
+/** A flat-topped hexagonal plate. */
+function hexPlate(m: Mesh, cx: number, cy: number, rad: number, col: string, o: { h?: number; b?: number; dome?: number; seed?: number } = {}) {
+  const b = o.b ?? 0.9;
+  const ring = (rr: number): P2[] => Array.from({ length: 6 }, (_, i) => [cx + Math.cos((i * Math.PI) / 3) * rr, cy + Math.sin((i * Math.PI) / 3) * rr] as P2);
+  facetPlate(m, ring(rad), ring(rad - b * 1.155), col, o);
+}
+
+/**
+ * A long wood plank: bevelled on all sides, its top a strip of triangles with gently varying heights
+ * (a little warp and wear), so it catches the light in facets instead of as one flat slab.
+ */
+function plank(m: Mesh, x0: number, x1: number, y0: number, y1: number, col: string, key: string) {
+  const b = 0.45;
+  const h = 0.25;
+  const segs = Math.max(2, Math.round((x1 - x0) / 9));
+  const ox: number[] = [];
+  const ix: number[] = [];
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs;
+    let px = x0 + (x1 - x0) * t;
+    if (i > 0 && i < segs) px += rnd(key, i, 'x') * 1.5;
+    ox.push(px);
+    ix.push(Math.max(x0 + b, Math.min(x1 - b, px)));
+  }
+  // a gentle warp along the plank: each segment tilts a little, but stays planar (calm facets)
+  const zb = (i: number) => h + rnd(key, i) * 0.08;
+  const zf = zb;
+  const polys: V3[][] = [];
+  for (let i = 0; i < segs; i++) {
+    const A: V3 = [ix[i], y0 + b, zb(i)];
+    const B: V3 = [ix[i + 1], y0 + b, zb(i + 1)];
+    const C: V3 = [ix[i + 1], y1 - b, zf(i + 1)];
+    const D: V3 = [ix[i], y1 - b, zf(i)];
+    polys.push([A, B, C, D]);
+    polys.push([[ox[i], y0, 0], [ox[i + 1], y0, 0], B, A]);
+    polys.push([[ox[i], y1, 0], [ox[i + 1], y1, 0], C, D]);
+  }
+  polys.push([[x0, y0, 0], [x0, y1, 0], [ix[0], y1 - b, zf(0)], [ix[0], y0 + b, zb(0)]]);
+  polys.push([[x1, y0, 0], [x1, y1, 0], [ix[segs], y1 - b, zf(segs)], [ix[segs], y0 + b, zb(segs)]]);
+  // the warped top is not convex, so emit plain faces (each one is lit by the side facing the camera)
+  for (const p of polys) m.face(p, col, { jitter: 0.02 });
+}
+
+/**
+ * A recess cut into a front (y = 16) face: opening xa..xb, za..zb; the back plane sits `d` deep and
+ * each side slopes in by `e` (> d, so every slope faces the camera). Sides with l / r = false are left
+ * open so a recess can continue seamlessly into the neighbouring tile.
+ */
+function frontRecess(
+  m: Mesh,
+  xa: number,
+  xb: number,
+  za: number,
+  zb: number,
+  d: number,
+  e: number,
+  back: string,
+  rim: string,
+  o: { l?: boolean; r?: boolean; layer?: number; emissive?: boolean; y?: number } = {},
+) {
+  const l = o.l ?? true;
+  const rr = o.r ?? true;
+  const Y = o.y ?? 16;
+  const Yb = Y - d;
+  const ixa = l ? xa + e : xa;
+  const ixb = rr ? xb - e : xb;
+  const iza = za + e;
+  const izb = zb - e;
+  const fo = { layer: o.layer ?? 1, jitter: 0 };
+  m.face([[ixa, Yb, iza], [ixb, Yb, iza], [ixb, Yb, izb], [ixa, Yb, izb]], back, { ...fo, emissive: o.emissive });
+  m.face([[xa, Y, za], [xb, Y, za], [ixb, Yb, iza], [ixa, Yb, iza]], rim, fo);
+  m.face([[xa, Y, zb], [xb, Y, zb], [ixb, Yb, izb], [ixa, Yb, izb]], rim, fo);
+  if (l) m.face([[xa, Y, za], [xa, Y, zb], [ixa, Yb, izb], [ixa, Yb, iza]], rim, fo);
+  if (rr) m.face([[xb, Y, za], [xb, Y, zb], [ixb, Yb, izb], [ixb, Yb, iza]], rim, fo);
+  return { ixa, ixb, iza, izb, Yb };
+}
+
+/**
+ * A recess cut into a horizontal surface at height z (a wall cap or a floor plate). Open sides (no
+ * slope) are shifted so the floor of the recess lines up exactly with the neighbouring tile's.
+ */
+function topRecess(
+  m: Mesh,
+  xa: number,
+  xb: number,
+  ya: number,
+  yb: number,
+  z: number,
+  d: number,
+  e: number,
+  back: string,
+  rim: string,
+  o: { l?: boolean; r?: boolean; far?: boolean; near?: boolean; layer?: number; emissive?: boolean } = {},
+) {
+  const l = o.l ?? true;
+  const rr = o.r ?? true;
+  const far = o.far ?? true;
+  const near = o.near ?? true;
+  const zb = z - d;
+  const ixa = l ? xa + e : xa + SKEW * d;
+  const ixb = rr ? xb - e : xb + SKEW * d;
+  const iya = far ? ya + e : ya - d;
+  const iyb = near ? yb - e : yb - d;
+  const fo = { layer: o.layer ?? 1, jitter: 0 };
+  m.face([[ixa, iya, zb], [ixb, iya, zb], [ixb, iyb, zb], [ixa, iyb, zb]], back, { ...fo, emissive: o.emissive });
+  if (far) m.face([[xa, ya, z], [xb, ya, z], [ixb, iya, zb], [ixa, iya, zb]], rim, fo);
+  if (near) m.face([[xa, yb, z], [xb, yb, z], [ixb, iyb, zb], [ixa, iyb, zb]], rim, fo);
+  if (l) m.face([[xa, ya, z], [xa, yb, z], [ixa, iyb, zb], [ixa, iya, zb]], rim, fo);
+  if (rr) m.face([[xb, ya, z], [xb, yb, z], [ixb, iyb, zb], [ixb, iya, zb]], rim, fo);
+  return { ixa, ixb, iya, iyb, zb };
+}
+
+/** Diagonal hazard stripes across a vertical plane y = Y, spanning x0..x1, between z0 and z1. */
+function faceStripes(m: Mesh, x0: number, x1: number, Y: number, z0: number, z1: number, layer: number) {
+  const rise = (x1 - x0) * 0.55;
+  const t = 1.1;
+  for (let z = z0; z + rise + t <= z1 + 0.01; z += t * 2.2) {
+    m.face([[x0, Y, z], [x1, Y, z + rise], [x1, Y, z + rise + t], [x0, Y, z + t]], HAZARD, { layer, jitter: 0 });
+  }
 }
 
 // ---------------- floor layer ----------------
 
-function drawFloor(ctx: Ctx, map: OfficeMap, x: number, y: number) {
-  const room = map.roomAt(x, y);
-  const base = FLOORS[room ?? 'hall'];
-  r(ctx, 0, 0, 16, 16, base);
-  const rnd = hash(x, y);
-  const dark = shade(base, -0.22);
-  const light = shade(base, 0.1);
+interface Box {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
 
-  if (room === 'lounge' || room === 'reception' || room === 'dorm') {
-    // worn carpet
-    for (let py = 0; py < 16; py += 2) for (let px = (py / 2) % 2; px < 16; px += 2) r(ctx, px, py, 1, 1, shade(base, -0.08));
-  } else if (room === 'openOffice' || !room) {
-    // corridor grating: slats over a dark gap, with a frame every tile
-    r(ctx, 0, 0, 16, 16, shade(base, -0.35));
-    for (let py = 1; py < 15; py += 3) {
-      r(ctx, 1, py, 14, 2, base);
-      r(ctx, 1, py, 14, 1, light);
-    }
-    r(ctx, 0, 0, 16, 1, dark);
-    r(ctx, 0, 0, 1, 16, dark);
-  } else if (room === 'meeting' || room === 'research' || room === 'whiteboard') {
-    // offset deck plates (a staggered, hex-like pattern)
-    const off = (y % 2) * 8;
-    r(ctx, 0, 0, 16, 1, dark);
-    r(ctx, (off + 0) % 16, 0, 1, 16, dark);
-    r(ctx, (off + 8) % 16, 0, 1, 16, dark);
-    r(ctx, 1, 1, 6, 1, light);
-    r(ctx, 9, 1, 6, 1, light);
-  } else if (room === 'library') {
-    // scuffed plating with a worn path pattern
-    r(ctx, 0, 0, 16, 1, dark);
-    r(ctx, 0, 8, 16, 1, dark);
-    r(ctx, (rnd % 2) * 8, 0, 1, 16, dark);
-  } else {
-    // heavy deck plates with bevels and rivets
-    r(ctx, 0, 0, 16, 1, light);
-    r(ctx, 0, 0, 1, 16, light);
-    r(ctx, 0, 15, 16, 1, dark);
-    r(ctx, 15, 0, 1, 16, dark);
-    for (const [px, py] of [[2, 2], [13, 2], [2, 13], [13, 13]]) r(ctx, px, py, 1, 1, shade(base, -0.3));
-    if (room === 'workshop' && y % 3 === 0) r(ctx, 0, 11, 16, 1, '#1b2028'); // cable trench
-    if (room === 'serverRoom') {
-      r(ctx, 7, 0, 1, 16, shade(base, 0.12));
-      r(ctx, 0, 7, 16, 1, shade(base, 0.12));
-    }
+function drawFloors(ctx: Ctx, map: OfficeMap) {
+  const T = map.tileSize;
+  r(ctx, 0, 0, map.w * T, map.h * T, '#1a1b20');
+
+  const seen = new Set<string>();
+  for (const id of Object.keys(map.rooms) as RoomId[]) {
+    const [rx0, ry0, rx1, ry1] = map.rooms[id].rect;
+    const key = `${rx0},${ry0},${rx1},${ry1}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    // the floor runs on under the gap between the room and its slim walls
+    const b: Box = { x0: (rx0 + 1) * T - WALL_IN, y0: (ry0 + 1) * T - WALL_IN, x1: rx1 * T + WALL_IN, y1: ry1 * T + WALL_IN };
+    ctx.save();
+    clipRect(ctx, b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
+    roomFloor(ctx, id, b);
+    ctx.restore();
   }
+
+  // stray floor outside any room (corridors): grating, tile by tile
+  for (let y = 0; y < map.h; y++)
+    for (let x = 0; x < map.w; x++) {
+      const c = map.at(x, y);
+      if (isSolid(c) || isDoor(c) || map.roomAt(x, y)) continue;
+      ctx.save();
+      ctx.translate(x * T, y * T);
+      // reach under the gap beside neighbouring slim walls
+      const gx0 = isSolid(map.at(x - 1, y)) ? -WALL_IN : 0;
+      const gy0 = isSolid(map.at(x, y - 1)) ? -WALL_IN : 0;
+      const gx1 = isSolid(map.at(x + 1, y)) ? 16 + WALL_IN : 16;
+      const gy1 = isSolid(map.at(x, y + 1)) ? 16 + WALL_IN : 16;
+      clipRect(ctx, gx0, gy0, gx1 - gx0, gy1 - gy0);
+      const m = new Mesh(hash('hall', x, y));
+      grate(ctx, m, gx0, gy0, gx1, gy1, FLOORS.hall, true);
+      m.draw(ctx);
+      ctx.restore();
+    }
+
+  // door thresholds
+  for (let y = 0; y < map.h; y++)
+    for (let x = 0; x < map.w; x++) {
+      const c = map.at(x, y);
+      if (!isDoor(c)) continue;
+      ctx.save();
+      ctx.translate(x * T, y * T);
+      clipRect(ctx, 0, 0, T, T);
+      drawDoorFloor(ctx, map, x, y, c === 'E');
+      ctx.restore();
+    }
+
   // grime, scuffs and the odd oil stain: this station has seen some use
-  for (let i = 0; i < 3; i++) {
-    const k = hash(rnd, i);
-    r(ctx, k % 15, (k >> 4) % 15, 1, 1, 'rgba(0,0,0,0.18)');
+  for (let y = 0; y < map.h; y++)
+    for (let x = 0; x < map.w; x++) {
+      if (map.at(x, y) !== '.') continue;
+      const k = hash(x, y, 'grime');
+      if (k % 5 !== 0) continue;
+      stain(ctx, k, x * T + 4 + (k % 8), y * T + 4 + ((k >> 4) % 8), 2.4, 'rgba(10,8,6,0.09)');
+    }
+}
+
+/** A grating: a raised frame around chunky slats over a dark sump. */
+function grate(ctx: Ctx, m: Mesh, x0: number, y0: number, x1: number, y1: number, base: string, frame: boolean) {
+  r(ctx, x0, y0, x1 - x0, y1 - y0, shade(base, -0.55));
+  if (frame) {
+    const fb = 1.4;
+    plate(m, x0, y0, x1, y0 + fb, base, { c: 0, b: 0.5, h: 0.45, dome: 0 });
+    plate(m, x0, y1 - fb, x1, y1, base, { c: 0, b: 0.5, h: 0.45, dome: 0 });
+    plate(m, x0, y0 + fb, x0 + fb, y1 - fb, base, { c: 0, b: 0.5, h: 0.45, dome: 0 });
+    plate(m, x1 - fb, y0 + fb, x1, y1 - fb, base, { c: 0, b: 0.5, h: 0.45, dome: 0 });
+    x0 += fb;
+    x1 -= fb;
+    y0 += fb;
+    y1 -= fb;
   }
-  if (rnd % 7 === 0) r(ctx, 3 + (rnd % 8), 3 + ((rnd >> 3) % 8), 3, 2, 'rgba(20,14,10,0.22)');
-  if (rnd % 5 === 1) r(ctx, 2 + (rnd % 10), 4 + ((rnd >> 5) % 8), 3, 1, 'rgba(255,255,255,0.06)');
+  const n = Math.max(2, Math.round((y1 - y0) / 2.6));
+  const step = (y1 - y0) / n;
+  for (let i = 0; i < n; i++) {
+    m.box(x0 + 0.3, y0 + i * step + 0.45, 0, x1 - x0 - 0.6, step - 0.9, 0.35, shade(base, 0.04), { bevel: 0.3, bevelH: 0.2, jitter: 0.02 });
+  }
+}
+
+/** A carpet: a continuous low-poly heightfield (big soft triangles), seamless across the room. */
+function carpet(m: Mesh, b: Box, col: string, key: string, cell = 8, amp = 0.75) {
+  const nx = Math.ceil((b.x1 - b.x0) / cell) + 2;
+  const ny = Math.ceil((b.y1 - b.y0) / cell) + 2;
+  const P = (i: number, j: number): V3 => {
+    const gx = b.x0 + (i - 1) * cell;
+    const gy = b.y0 + (j - 1) * cell;
+    return [gx + rnd(key, gx, gy, 'x') * cell * 0.22, gy + rnd(key, gx, gy, 'y') * cell * 0.22, amp * (0.5 + 0.5 * rnd(key, gx, gy, 'z'))];
+  };
+  for (let j = 0; j < ny; j++)
+    for (let i = 0; i < nx; i++) {
+      const a = P(i, j);
+      const bb = P(i + 1, j);
+      const c = P(i + 1, j + 1);
+      const d = P(i, j + 1);
+      if ((i + j) & 1) {
+        m.face([a, bb, c], col, { jitter: 0.03 });
+        m.face([a, c, d], col, { jitter: 0.03 });
+      } else {
+        m.face([a, bb, d], col, { jitter: 0.03 });
+        m.face([bb, c, d], col, { jitter: 0.03 });
+      }
+    }
+}
+
+/** A rug lying on carpet: a thick bevelled border, a raised field and a row of diamond motifs. */
+function rug(m: Mesh, x0: number, y0: number, x1: number, y1: number, border: string, field: string, accent: string, seed: number) {
+  plate(m, x0, y0, x1, y1, border, { z0: 0, h: 1.0, b: 0.7, c: 0.8, dome: 0, layer: 1, seed, jitter: 0.015 });
+  plate(m, x0 + 1.8, y0 + 1.8, x1 - 1.8, y1 - 1.8, field, { z0: 1.0, h: 0.2, b: 0.45, c: 0.6, dome: 0.12, layer: 2, seed: seed + 1, jitter: 0.02 });
+  const cy = (y0 + y1) / 2;
+  const n = Math.max(1, Math.round((x1 - x0 - 6) / 9));
+  const step = (x1 - x0 - 4) / n;
+  const ry = Math.min(3, (y1 - y0) / 2 - 3);
+  for (let i = 0; i < n; i++) {
+    const cx = x0 + 2 + step * (i + 0.5);
+    m.extrude([[cx, cy - ry], [cx + ry * 0.9, cy], [cx, cy + ry], [cx - ry * 0.9, cy]], 1.25, 1.38, accent, { layer: 3, jitter: 0.02 });
+  }
+}
+
+function roomFloor(ctx: Ctx, id: RoomId, b: Box) {
+  const base = FLOORS[id] ?? FLOORS.hall;
+  const m = new Mesh(hash('floor', id));
+  // the groove colour between panels: the same material, a touch deeper (no black seams)
+  r(ctx, b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0, shade(base, -0.2));
+  const after: Array<() => void> = [];
+  const tint = (k: number, amt = 0.03) => shade(base, ((k % 5) - 2) * amt);
+
+  switch (id) {
+    case 'library': {
+      // long warm deck planks, three per tile row, staggered with random lengths
+      r(ctx, b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0, shade(base, -0.1));
+      const PW = 16 / 3;
+      for (let y = b.y0, row = 0; y < b.y1; y += PW, row++) {
+        let x = b.x0 - (hash('lib', row) % 40);
+        let n = 0;
+        while (x < b.x1) {
+          const len = 34 + (hash('libl', row, n) % 30);
+          const k = hash('plank', row, n);
+          plank(m, x + 0.12, x + len - 0.12, y + 0.12, y + PW - 0.12, tint(k, 0.04), `p${row}.${n}`);
+          x += len;
+          n++;
+        }
+      }
+      break;
+    }
+    case 'research': {
+      // hexagonal lab tiles: reads as low-poly terrain rather than a square grid
+      const R = 10;
+      const dx = R * 1.5;
+      const dy = R * Math.sqrt(3);
+      for (let i = -1; i * dx < b.x1 - b.x0 + R; i++)
+        for (let j = -1; j * dy < b.y1 - b.y0 + R; j++) {
+          const cx = b.x0 + i * dx;
+          const cy = b.y0 + j * dy + (i & 1 ? dy / 2 : 0);
+          const k = hash('hex', i, j);
+          hexPlate(m, cx, cy, R - 0.3, tint(k, 0.03), { h: 0.4, b: 1.0, dome: 0.22, seed: k });
+        }
+      break;
+    }
+    case 'serverRoom': {
+      // raised access floor: square tiles, every few a perforated cooling grate, teal aisle seams
+      for (let y = b.y0, ty = 0; y < b.y1; y += 16, ty++)
+        for (let x = b.x0, tx = 0; x < b.x1; x += 16, tx++) {
+          const k = hash('srv', tx, ty);
+          const grill = (tx + ty * 2) % 3 === 0;
+          plate(m, x + 0.3, y + 0.3, x + 15.7, y + 15.7, tint(k, 0.02), { c: 0.9, b: 0.7, h: 0.4, dome: grill ? 0 : 0.1, seed: k });
+          if (grill) {
+            const rc = topRecess(m, x + 3.2, x + 12.8, y + 3.2, y + 12.8, 0.4, 0.35, 0.5, '#13161b', shade(base, -0.05), { layer: 1 });
+            for (let i = 0; i < 4; i++) {
+              const sy = rc.iya + 0.3 + i * ((rc.iyb - rc.iya) / 4);
+              m.box(rc.ixa + 0.2, sy, rc.zb, rc.ixb - rc.ixa - 0.4, 0.9, 0.22, shade(base, 0.1), { layer: 2, jitter: 0 });
+            }
+          }
+        }
+      // cold-aisle light seams in the grooves
+      for (let y = b.y0 + 32; y < b.y1; y += 48) {
+        m.face([[b.x0, y - 0.25, 0.02], [b.x1, y - 0.25, 0.02], [b.x1, y + 0.25, 0.02], [b.x0, y + 0.25, 0.02]], TEAL, { emissive: true, alpha: 0.55, layer: 1 });
+        after.push(() => {
+          const g = ctx.createLinearGradient(0, y - 3, 0, y + 3);
+          g.addColorStop(0, 'rgba(95,212,224,0)');
+          g.addColorStop(0.5, 'rgba(95,212,224,0.14)');
+          g.addColorStop(1, 'rgba(95,212,224,0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(b.x0, y - 3, b.x1 - b.x0, 6);
+        });
+      }
+      break;
+    }
+    case 'workshop': {
+      // big bolted tech panels with a cable trench running through
+      for (let y = b.y0, ty = 0; y < b.y1; y += 32, ty++)
+        for (let x = b.x0, tx = 0; x < b.x1; x += 32, tx++) {
+          const k = hash('dev', tx, ty);
+          plate(m, x + 0.35, y + 0.35, x + 31.65, y + 31.65, tint(k, 0.025), { c: 2.2, b: 1.1, h: 0.45, dome: 0.3, seed: k });
+          for (const [bx, by] of [[3.4, 3.4], [28.6, 3.4], [3.4, 28.6], [28.6, 28.6]])
+            m.cylinder(x + bx, y + by, 0.45, 0.6, 0.45, 0.25, 6, shade(base, -0.08), { layer: 1, jitter: 0 });
+        }
+      for (let ty = 3; ty * 16 + b.y0 - 16 < b.y1; ty += 3) {
+        const ya = b.y0 + (ty - 1) * 16 + 9.4;
+        const yb = ya + 3.8;
+        m.face([[b.x0, ya + 0.6, 0], [b.x1, ya + 0.6, 0], [b.x1, yb, 0], [b.x0, yb, 0]], '#1b2028', { layer: 2, jitter: 0 });
+        m.face([[b.x0, ya, 0.45], [b.x1, ya, 0.45], [b.x1, ya + 0.6, 0], [b.x0, ya + 0.6, 0]], shade(base, -0.1), { layer: 2, jitter: 0 });
+        for (const [cy, rad, col] of [[ya + 1.7, 0.55, '#262a31'], [ya + 2.9, 0.4, '#3d3630']] as Array<[number, number, string]>) {
+          m.push().translate(b.x0, cy, rad).rotateY(Math.PI / 2).cylinder(0, 0, 0, rad, rad, b.x1 - b.x0, 6, col, { layer: 3, jitter: 0, rot: 0 }).pop();
+        }
+      }
+      break;
+    }
+    case 'mailroom': {
+      // scuffed sand plating, bolted, with stencilled lane markers
+      for (let y = b.y0, ty = 0; y < b.y1; y += 32, ty++)
+        for (let x = b.x0, tx = 0; x < b.x1; x += 32, tx++) {
+          const k = hash('mail', tx, ty);
+          plate(m, x + 0.35, y + 0.35, x + 31.65, y + 31.65, tint(k, 0.03), { c: 2.4, b: 1.1, h: 0.4, dome: 0.28, seed: k });
+          for (const [bx, by] of [[3.4, 3.4], [28.6, 3.4], [3.4, 28.6], [28.6, 28.6]])
+            m.cylinder(x + bx, y + by, 0.4, 0.6, 0.45, 0.25, 6, shade(base, -0.1), { layer: 1, jitter: 0 });
+          if (tx % 2 === 0) {
+            const cx = x + 16;
+            const cy = y + 16;
+            m.face([[cx - 5, cy - 1.6, 0.72], [cx + 3, cy - 1.6, 0.72], [cx + 5, cy + 1.6, 0.72], [cx - 3, cy + 1.6, 0.72]], HAZARD, { layer: 2, alpha: 0.28, jitter: 0 });
+          }
+        }
+      break;
+    }
+    case 'openOffice': {
+      // big calm composite deck: 2x2-tile panels, softly faceted
+      for (let y = b.y0, ty = 0; y < b.y1; y += 32, ty++)
+        for (let x = b.x0, tx = 0; x < b.x1; x += 32, tx++) {
+          const k = hash('oo', tx, ty);
+          plate(m, x + 0.35, y + 0.35, x + 31.65, y + 31.65, tint(k, 0.018), { c: 2.6, b: 1.1, h: 0.45, dome: 0.32, seed: k });
+        }
+      break;
+    }
+    case 'meeting': {
+      for (let y = b.y0, ty = 0; y < b.y1; y += 32, ty++)
+        for (let x = b.x0, tx = 0; x < b.x1; x += 32, tx++) {
+          const k = hash('meet', tx, ty);
+          plate(m, x + 0.35, y + 0.35, x + 31.65, y + 31.65, tint(k, 0.02), { c: 1.4, b: 1.0, h: 0.4, dome: 0.28, seed: k });
+        }
+      // a big rug under the table
+      rug(m, b.x0 + 8, b.y0 + 24, b.x1 - 8, b.y1 - 24, '#3b2f45', '#4a3d58', '#7a6a8a', 3);
+      break;
+    }
+    case 'whiteboard': {
+      // diagonal (diamond) plates: a 45-degree lattice, so the room never reads as a square grid
+      const D = 16; // half-diagonal
+      for (let j = -1; j * D < b.y1 - b.y0 + D; j++)
+        for (let i = -1; i * 2 * D < b.x1 - b.x0 + 2 * D; i++) {
+          const cx = b.x0 + i * 2 * D + (j & 1 ? D : 0);
+          const cy = b.y0 + j * D;
+          const k = hash('wb', i, j);
+          const ring = (hd: number): P2[] => [[cx, cy - hd], [cx + hd, cy], [cx, cy + hd], [cx - hd, cy]];
+          facetPlate(m, ring(D - 0.45), ring(D - 0.45 - 1.3), tint(k, 0.025), { h: 0.38, dome: 0.25, seed: k });
+        }
+      break;
+    }
+    case 'reception': {
+      carpet(m, b, base, 'rec');
+      // a rug in front of the manager's desk
+      rug(m, b.x0 + 24, b.y0 + 40, b.x1 - 24, b.y1 - 24, '#43352c', '#5a3236', '#7a5f42', 1);
+      break;
+    }
+    case 'lounge': {
+      carpet(m, b, base, 'lounge');
+      rug(m, b.x0 + 8, b.y0 + 40, b.x0 + 104, b.y0 + 88, '#2f4a4a', '#3c5e5c', '#a8884a', 2);
+      break;
+    }
+    case 'dorm': {
+      carpet(m, b, base, 'dorm', 8, 0.6);
+      // a runner down the aisle between the bunks
+      rug(m, b.x0 + 33, b.y0 + 4, b.x0 + 47, b.y1 - 4, '#3a3048', '#4b4266', '#8a7ab0', 4);
+      break;
+    }
+    default: {
+      for (let y = b.y0, ty = 0; y < b.y1; y += 16, ty++)
+        for (let x = b.x0, tx = 0; x < b.x1; x += 16, tx++) {
+          const k = hash('def', tx, ty);
+          plate(m, x + 0.3, y + 0.3, x + 15.7, y + 15.7, tint(k), { c: 1.6, b: 0.9, h: 0.4, dome: 0.15, seed: k });
+        }
+    }
+  }
+  m.draw(ctx);
+  for (const f of after) f();
 }
 
 function drawDoorFloor(ctx: Ctx, map: OfficeMap, x: number, y: number, entrance: boolean) {
-  r(ctx, 0, 0, 16, 16, '#3a3834');
-  const blocked = (c: string) => isWallish(c) || isDoor(c);
-  const vertical = blocked(map.at(x, y - 1)) || blocked(map.at(x, y + 1));
-  // blast-door threshold: a recessed track with hazard chevrons on either side
-  if (vertical) {
-    r(ctx, 6, 0, 4, 16, '#22211f');
-    r(ctx, 7, 0, 2, 16, '#141312');
-    for (let i = 0; i < 16; i += 4) {
-      r(ctx, 1, i, 4, 2, '#d9a53a');
-      r(ctx, 11, i + 2, 4, 2, '#d9a53a');
-    }
-  } else {
-    r(ctx, 0, 6, 16, 4, '#22211f');
-    r(ctx, 0, 7, 16, 2, '#141312');
-    for (let i = 0; i < 16; i += 4) {
-      r(ctx, i, 1, 2, 4, '#d9a53a');
-      r(ctx, i + 2, 11, 2, 4, '#d9a53a');
+  const base = '#4a4740';
+  const m = new Mesh(hash('door', x, y));
+  const blocked = (c: string) => isSolid(c) || isDoor(c);
+  // a door in a horizontal wall: people pass north-south
+  const ns = blocked(map.at(x - 1, y)) || blocked(map.at(x + 1, y)) || !(blocked(map.at(x, y - 1)) || blocked(map.at(x, y + 1)));
+  // swap axes so one layout serves both orientations
+  const P = (u: number, v: number): [number, number] => (ns ? [u, v] : [v, u]);
+  const rect = (u0: number, v0: number, u1: number, v1: number) => {
+    const [ax, ay] = P(u0, v0);
+    const [bx, by] = P(u1, v1);
+    return [Math.min(ax, bx), Math.min(ay, by), Math.max(ax, bx), Math.max(ay, by)] as const;
+  };
+  // blast-door threshold: raised sill plates either side of a grated track
+  const [tx0, ty0, tx1, ty1] = rect(5.6, 0, 10.4, 16);
+  ctx.save();
+  grate(ctx, m, tx0, ty0, tx1, ty1, '#3a3834', false);
+  ctx.restore();
+  for (const [u0, u1] of [[0.2, 5.6], [10.4, 15.8]]) {
+    const [a, b, c, d] = rect(u0, -0.2, u1, 16.2);
+    plate(m, a, b, c, d, base, { c: 0, b: 0.8, h: 0.6, dome: 0.08 });
+    // hazard chevrons, as raised inlays on the sill
+    const cu = (u0 + u1) / 2;
+    for (const cv of [4, 12]) {
+      const arms: Array<Array<[number, number]>> = [
+        [[cu - 1.6, cv - 1.8], [cu, cv], [cu, cv + 1.2], [cu - 1.6, cv - 0.6]],
+        [[cu, cv], [cu + 1.6, cv - 1.8], [cu + 1.6, cv - 0.6], [cu, cv + 1.2]],
+      ];
+      for (const arm of arms) m.extrude(arm.map(([u, v]) => P(u, v)), 0.6, 0.78, HAZARD, { layer: 2, jitter: 0 });
     }
   }
+  m.draw(ctx);
   if (entrance) {
-    r(ctx, 1, 1, 2, 2, '#58e07a');
-    r(ctx, 1, 13, 2, 2, '#58e07a');
+    // airlock: green guide lights
+    const lm = new Mesh(hash('elight', x, y));
+    for (const [u, v] of [[2.9, 1.6], [2.9, 14.4], [13.1, 1.6], [13.1, 14.4]]) {
+      const [lx, ly] = P(u, v);
+      lm.cylinder(lx, ly, 0.6, 0.9, 0.7, 0.3, 6, '#58e07a', { emissive: true });
+      glow(ctx, lx, ly - 0.9, 3.2, '88,224,122', 0.45);
+    }
+    lm.draw(ctx);
   }
-}
-
-/** A wall panel slid aside: bulkhead-coloured plating with a dark passage seam and a faint glyph. */
-function drawSecretDoorFloor(ctx: Ctx) {
-  r(ctx, 0, 0, 16, 16, '#2d2f35');
-  r(ctx, 0, 0, 3, 16, '#3d3f46'); // panel edge, slid into the left jamb
-  r(ctx, 3, 0, 1, 16, '#1b1c20');
-  r(ctx, 5, 0, 7, 16, '#1f2025'); // the passage
-  r(ctx, 6, 0, 5, 16, '#17181c');
-  r(ctx, 13, 0, 3, 16, '#3d3f46');
-  r(ctx, 12, 0, 1, 16, '#1b1c20');
-  r(ctx, 14, 6, 1, 1, '#b07cff'); // tiny glowing glyph only people in the know notice
-  r(ctx, 14, 8, 1, 1, '#b07cff');
-  r(ctx, 14, 7, 1, 1, 'rgba(176,124,255,0.4)');
 }
 
 /** Light comes from the top-left: shadows fall down and to the right. */
 function drawFloorShading(ctx: Ctx, map: OfficeMap, x: number, y: number) {
   const c = map.at(x, y);
-  if (isWallish(c)) return;
+  if (isSolid(c)) return;
   if (isObject(c)) {
-    // drop shadow of furniture onto the floor to its lower right
-    const g = ctx.createLinearGradient(0, 12, 0, 20);
-    g.addColorStop(0, 'rgba(0,0,0,0.32)');
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(2, 12, 16, 8);
+    // soft contact shadow of furniture, falling a little to the lower right (no hard-edged boxes)
+    softShadow(ctx, 9.5, 14, 10, 4.5, 0.32);
     return;
   }
-  // ambient occlusion where floor meets a wall
-  if (isWallish(map.at(x, y - 1))) {
-    const g = ctx.createLinearGradient(0, 0, 0, 7);
+  // ambient occlusion where floor meets a wall (slim walls stand WALL_IN into their own tile)
+  const I = WALL_IN;
+  if (isSolid(map.at(x, y - 1))) {
+    const g = ctx.createLinearGradient(0, -I, 0, 8 - I);
     g.addColorStop(0, 'rgba(0,0,0,0.42)');
+    g.addColorStop(0.35, 'rgba(0,0,0,0.16)');
     g.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = g;
-    ctx.fillRect(0, 0, 16, 7);
+    ctx.fillRect(0, -I, 16, 8);
   }
-  if (isWallish(map.at(x - 1, y))) {
-    const g = ctx.createLinearGradient(0, 0, 5, 0);
-    g.addColorStop(0, 'rgba(0,0,0,0.35)');
+  if (isSolid(map.at(x - 1, y))) {
+    const g = ctx.createLinearGradient(-I, 0, 6 - I, 0);
+    g.addColorStop(0, 'rgba(0,0,0,0.34)');
     g.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = g;
-    ctx.fillRect(0, 0, 5, 16);
+    ctx.fillRect(-I, 0, 6, 16);
   }
-  if (isWallish(map.at(x + 1, y))) {
-    r(ctx, 15, 0, 1, 16, 'rgba(0,0,0,0.15)');
+  if (isSolid(map.at(x + 1, y))) {
+    const g = ctx.createLinearGradient(16 + I, 0, 12 + I, 0);
+    g.addColorStop(0, 'rgba(0,0,0,0.18)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(12 + I, 0, 4, 16);
+  }
+  if (isSolid(map.at(x, y + 1))) {
+    const g = ctx.createLinearGradient(0, 16 + I, 0, 16 + I - 3);
+    g.addColorStop(0, 'rgba(0,0,0,0.16)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 13 + I, 16, 3);
   }
 }
 
 // ---------------- walls ----------------
 
-function drawWallCap(ctx: Ctx, map: OfficeMap, x: number, y: number) {
-  const top = '#2d2f35';
-  r(ctx, 0, -WALL_RISE, 16, 16, top);
-  const edge = '#4a4d56';
-  const up = map.at(x, y - 1);
-  if (!isWallish(up)) r(ctx, 0, -WALL_RISE, 16, 1, edge);
-  if (!isWallish(map.at(x - 1, y))) r(ctx, 0, -WALL_RISE, 1, 16, edge);
-  if (!isWallish(map.at(x + 1, y))) r(ctx, 15, -WALL_RISE, 1, 16, '#1b1c20');
-  // greebles: conduit runs and vents on top of the bulkheads
-  const k = hash('cap', x, y);
-  if (k % 3 === 0) {
-    r(ctx, 0, -WALL_RISE + 5, 16, 2, '#3e4048');
-    r(ctx, 0, -WALL_RISE + 5, 16, 1, '#555862');
-  }
-  if (k % 5 === 1) {
-    r(ctx, 4, -WALL_RISE + 2, 6, 3, '#1f2025');
-    for (let i = 0; i < 3; i++) r(ctx, 5 + i * 2, -WALL_RISE + 3, 1, 1, '#3a3c44');
-  }
-  r(ctx, 0, -WALL_RISE + 10, 16, 1, 'rgba(0,0,0,0.15)');
+/** How far a wall sits in from an open side of its tile (the wall is 16 - 2·WALL_IN thick). */
+export const WALL_IN = 4.5;
+const WA = WALL_IN;
+const WB = 16 - WALL_IN;
+/** Rounded cap: two bevel steps (insets B1, B2) between the vertical sides (top at Z1) and the cap (H). */
+const B1 = 0.7;
+const B2 = 1.8;
+const Z1 = H - 1.7;
+const Z2 = H - 0.55;
+
+/** Walls reach out to (join) neighbouring walls and doors. */
+const joins = (c: string) => isSolid(c) || isDoor(c);
+
+interface Outline {
+  /** Footprint polygon, clockwise on screen. */
+  pts: P2[];
+  /** open[i]: edge pts[i] -> pts[i+1] is exposed (gets faces and a bevel); closed edges meet a neighbour. */
+  open: boolean[];
 }
 
-/** True when the tile below is open, so the wall shows its front face. */
-const hasFace = (map: OfficeMap, x: number, y: number) => y < map.h - 1 && !isWallish(map.at(x, y + 1));
+/** The wall's footprint on its tile: a central core plus an arm toward every joined neighbour. */
+function wallOutline(map: OfficeMap, x: number, y: number): Outline {
+  const last = y === map.h - 1;
+  const U = joins(map.at(x, y - 1));
+  const D = joins(map.at(x, y + 1));
+  const L = joins(map.at(x - 1, y));
+  const R = joins(map.at(x + 1, y));
+  const tU = U ? 0 : WA;
+  const bD = D ? 16 : WB;
+  const lL = L ? 0 : WA;
+  const rR = R ? 16 : WB;
+  const raw: P2[] = [[WA, tU], [WB, tU], [WB, WA], [rR, WA], [rR, WB], [WB, WB], [WB, bD], [WA, bD], [WA, WB], [lL, WB], [lL, WA], [WA, WA]];
+  let pts = raw.filter((p, i) => {
+    const q = raw[(i + raw.length - 1) % raw.length];
+    return p[0] !== q[0] || p[1] !== q[1];
+  });
+  for (let i = 0; i < pts.length && pts.length > 3; ) {
+    const a = pts[(i + pts.length - 1) % pts.length];
+    const b = pts[i];
+    const c = pts[(i + 1) % pts.length];
+    if ((a[0] === b[0] && b[0] === c[0]) || (a[1] === b[1] && b[1] === c[1])) {
+      pts = pts.filter((_, k) => k !== i);
+      i = 0;
+    } else i++;
+  }
+  const edge = (v: number) => v === 0 || v === 16;
+  const open = pts.map((p, i) => {
+    const q = pts[(i + 1) % pts.length];
+    if (p[0] === q[0] && edge(p[0])) return isDoor(map.at(x + (p[0] === 16 ? 1 : -1), y));
+    if (p[1] === q[1] && edge(p[1])) return p[1] === 16 ? last || isDoor(map.at(x, y + 1)) : isDoor(map.at(x, y - 1));
+    return true;
+  });
+  return { pts, open };
+}
+
+/** Outward 2D normals of the outline's edges. */
+function normals(o: Outline): P2[] {
+  const n = o.pts.length;
+  return o.pts.map((p, i) => {
+    const q = o.pts[(i + 1) % n];
+    const dx = q[0] - p[0];
+    const dy = q[1] - p[1];
+    const l = Math.hypot(dx, dy) || 1;
+    return [dy / l, -dx / l] as P2;
+  });
+}
+
+/** The outline with its open edges pushed in by s (all corners are right angles). */
+function inset(o: Outline, s: number): P2[] {
+  const n = o.pts.length;
+  const nr = normals(o);
+  return o.pts.map((p, i) => {
+    const j = (i + n - 1) % n;
+    const a = o.open[j] ? s : 0;
+    const b = o.open[i] ? s : 0;
+    return [p[0] - a * nr[j][0] - b * nr[i][0], p[1] - a * nr[j][1] - b * nr[i][1]] as P2;
+  });
+}
+
+/** The wall solid: visible sides, two rounded bevel steps on every open edge, and the cap. */
+function wallSolid(m: Mesh, o: Outline, last: boolean) {
+  const n = o.pts.length;
+  const nr = normals(o);
+  const r1 = inset(o, B1);
+  const r2 = inset(o, B2);
+  const opt = (t: V3, layer = 0) => ({ twoSided: false, toward: t, jitter: 0, layer });
+  for (let i = 0; i < n; i++) {
+    if (!o.open[i]) continue;
+    const j = (i + 1) % n;
+    const a = o.pts[i];
+    const b = o.pts[j];
+    const [nx, ny] = nr[i];
+    if (nx * VIEW[0] + ny * VIEW[1] > 0) {
+      const col = ny > 0.5 && last ? HULL : BULKHEAD;
+      m.face([[a[0], a[1], 0], [b[0], b[1], 0], [b[0], b[1], Z1], [a[0], a[1], Z1]], col, opt([nx, ny, 0]));
+    }
+    m.face([[a[0], a[1], Z1], [b[0], b[1], Z1], [r1[j][0], r1[j][1], Z2], [r1[i][0], r1[i][1], Z2]], CAP_EDGE, opt([nx, ny, 0.6], 1));
+    m.face([[r1[i][0], r1[i][1], Z2], [r1[j][0], r1[j][1], Z2], [r2[j][0], r2[j][1], H], [r2[i][0], r2[i][1], H]], CAP, opt([nx * 0.5, ny * 0.5, 1], 1));
+  }
+  m.face(r2.map(([px, py]) => [px, py, H] as V3), CAP, { jitter: 0, layer: 1 });
+}
+const CAP_EDGE = '#34363e';
+
+type Glass =
+  | { kind: 'front'; x0: number; x1: number; y: number; z0: number; z1: number }
+  | { kind: 'side'; x: number; y0: number; y1: number; z0: number; z1: number };
+
+/** Does this wall tile show a front face, and where (screen-plane y within the tile)? */
+function frontOf(map: OfficeMap, x: number, y: number): number | null {
+  if (x < 0 || y < 0 || x >= map.w || y >= map.h || !isSolid(map.at(x, y))) return null;
+  if (y === map.h - 1) return 16;
+  return joins(map.at(x, y + 1)) ? null : WB;
+}
+/** A viewport in a wall's front face. */
+const isFaceWindow = (map: OfficeMap, x: number, y: number) => map.at(x, y) === 'V' && frontOf(map, x, y) !== null;
+/** A plain bulkhead front (the light strip, kick band and pipes run continuously along these). */
+const isFaceWall = (map: OfficeMap, x: number, y: number) => frontOf(map, x, y) !== null && map.at(x, y) !== 'V';
+
+/** Glass geometry of a viewport tile (shared by drawWall and windowGlass). */
+function glassOf(map: OfficeMap, x: number, y: number): (Glass & { l: boolean; r: boolean; xa: number; xb: number }) | null {
+  if (map.at(x, y) !== 'V') return null;
+  const fy = frontOf(map, x, y);
+  if (fy !== null) {
+    const wl = isFaceWindow(map, x - 1, y);
+    const wr = isFaceWindow(map, x + 1, y);
+    const xa = wl ? 0 : 1.0;
+    const xb = wr ? 16 : 15.0;
+    const e = 1.3;
+    return { kind: 'front', x0: wl ? xa : xa + e, x1: wr ? xb : xb - e, y: fy - WIN_D, z0: WIN_Z0 + e, z1: WIN_Z1 - e, l: !wl, r: !wr, xa, xb };
+  }
+  // a viewport in a wall running north-south: glass in its (visible) right-hand side
+  if (joins(map.at(x + 1, y))) return null;
+  const y0 = (joins(map.at(x, y - 1)) ? 0 : WA) + 1.2;
+  const y1 = (joins(map.at(x, y + 1)) ? 16 : WB) - 1.2;
+  return { kind: 'side', x: WB + 0.06, y0, y1, z0: 2.6, z1: 9.0, l: true, r: true, xa: y0, xb: y1 };
+}
+const WIN_Z0 = 1.2;
+const WIN_Z1 = 9.6;
+/** Bulkhead front: inset panels and the accent light strip (heights on the face). */
+const PZ0 = 2.0;
+const PZ1 = 6.0;
+const LZ0 = 6.5;
+const LZ1 = 8.3;
+const WIN_D = 1.0;
+
+/** The run of plain bulkhead fronts that (x, y) belongs to: [first, last] tile x. */
+function faceRun(map: OfficeMap, x: number, y: number): [number, number] {
+  let a = x;
+  let b = x;
+  while (isFaceWall(map, a - 1, y)) a--;
+  while (isFaceWall(map, b + 1, y)) b++;
+  return [a, b];
+}
 
 function drawWall(ctx: Ctx, map: OfficeMap, x: number, y: number) {
-  drawWallCap(ctx, map, x, y);
-  if (y === map.h - 1) r(ctx, 0, 16 - WALL_RISE, 16, WALL_RISE, '#2d2f35'); // close off the map's bottom edge
-  if (!hasFace(map, x, y)) return;
-  const faceTop = 16 - WALL_RISE; // face runs from the bottom of the cap to the floor
-  const h = WALL_RISE;
-  const k = hash('wall', x, y);
-  // ribbed bulkhead panels
-  r(ctx, 0, faceTop, 16, h, '#3d3f46');
-  r(ctx, 0, faceTop, 16, 1, '#61646e'); // top lip catches the light
-  r(ctx, 0, faceTop + 1, 16, 1, '#2a2c31');
-  for (const rx of [3, 11]) {
-    r(ctx, rx, faceTop + 2, 2, h - 4, '#34363c');
-    r(ctx, rx, faceTop + 2, 1, h - 4, '#4b4e57');
-  }
-  // a pipe along some walls
-  if (k % 4 === 0) {
-    r(ctx, 0, faceTop + 3, 16, 2, '#56504a');
-    r(ctx, 0, faceTop + 3, 16, 1, '#7a7268');
-    r(ctx, 7, faceTop + 2, 2, 4, '#3a3530'); // clamp
-  }
-  // small control panel with blinking-ready lights, or a vent, or a warning stencil
-  if (k % 7 === 2) {
-    r(ctx, 5, faceTop + 3, 6, 5, '#1d1e22');
-    r(ctx, 6, faceTop + 4, 1, 1, '#e8534a');
-    r(ctx, 8, faceTop + 4, 1, 1, '#58e07a');
-    r(ctx, 6, faceTop + 6, 4, 1, '#d9a53a');
-  } else if (k % 7 === 4) {
-    r(ctx, 6, faceTop + 4, 5, 4, '#26272c');
-    for (let i = 0; i < 3; i++) r(ctx, 6, faceTop + 4 + i + i, 5, 1, '#1a1b1f');
-  }
-  // accent light strip (mostly warm, now and then cool)
-  const lit = (x + y) % 3 === 0;
-  const cool = k % 5 === 0;
-  r(ctx, 0, faceTop + 8, 16, 1, lit ? (cool ? '#5fd4e0' : '#ffb35a') : cool ? '#2f7a84' : '#7a5530');
-  if (lit) r(ctx, 0, faceTop + 9, 16, 1, cool ? 'rgba(95,212,224,0.22)' : 'rgba(255,179,90,0.2)');
-  // rust streak under a seam
-  if (k % 6 === 3) r(ctx, 12 + (k % 3), faceTop + 2, 1, 6, 'rgba(140,70,30,0.45)');
-  // baseboard
-  r(ctx, 0, 14, 16, 2, '#232428');
-  // blast-door frame next to a doorway: angled hazard-striped jamb
-  const doorLeft = isDoor(map.at(x - 1, y));
-  const doorRight = isDoor(map.at(x + 1, y));
-  if (doorLeft || doorRight) {
-    const jx = doorLeft ? 0 : 12;
-    r(ctx, jx, faceTop, 4, h, '#55524c');
-    for (let i = 0; i < h; i += 3) r(ctx, jx + (doorLeft ? 0 : 1), faceTop + i, 3, 1, '#d9a53a');
-    r(ctx, doorLeft ? 3 : 12, faceTop, 1, h, '#2a2926');
-  }
-  // darker where the wall ends next to an opening
-  if (!isWallish(map.at(x - 1, y)) && !doorLeft) r(ctx, 0, faceTop, 1, h, '#4d5059');
-  if (!isWallish(map.at(x + 1, y)) && !doorRight) r(ctx, 15, faceTop, 1, h, '#26272b');
-}
+  const c = map.at(x, y);
+  const last = y === map.h - 1;
+  const L = joins(map.at(x - 1, y));
+  const R = joins(map.at(x + 1, y));
+  const below = map.at(x, y + 1);
 
-function stars(ctx: Ctx, seed: number, x: number, y: number, w: number, h: number) {
-  r(ctx, x, y, w, h, '#0b1026');
-  for (let i = 0; i < 5; i++) {
-    const s = hash(seed, i);
-    r(ctx, x + (s % w), y + ((s >> 8) % h), 1, 1, i === 0 ? '#ffe9a8' : '#cfd8ff');
-  }
-  if (seed % 7 === 0 && w > 6 && h > 6) {
-    r(ctx, x + 2, y + 2, 3, 3, '#c0763c');
-    r(ctx, x + 2, y + 2, 1, 1, '#0b1026');
-  }
-}
+  const base = new Mesh(hash('wall', x, y));
+  const det = new Mesh(hash('wdet', x, y));
+  const glows: Array<() => void> = [];
 
-function drawWindow(ctx: Ctx, map: OfficeMap, x: number, y: number) {
-  drawWallCap(ctx, map, x, y);
-  const seed = hash('star', x, y);
-  if (hasFace(map, x, y)) {
-    // tall viewport in the wall face (and up into the cap)
-    const top = -WALL_RISE + 3;
-    r(ctx, 0, top - 1, 16, 16 - top + 1, '#8a95aa');
-    stars(ctx, seed, 1, top, 14, 14 - top);
-    r(ctx, 0, 14, 16, 2, '#232733');
-    // glass glint
-    r(ctx, 2, top + 1, 1, 3, 'rgba(255,255,255,0.25)');
-  } else if (isWallish(map.at(x - 1, y)) || isWallish(map.at(x + 1, y))) {
-    // window in a horizontal wall seen from above (e.g. the bottom outer wall): horizontal glass strip
-    if (y === map.h - 1) r(ctx, 0, 16 - WALL_RISE, 16, WALL_RISE, '#2c3140');
-    r(ctx, 0, -WALL_RISE + 4, 16, 9, '#8a95aa');
-    stars(ctx, seed, 0, -WALL_RISE + 5, 16, 7);
-  } else {
-    // window in a vertical wall seen from above: vertical glass strip
-    r(ctx, 4, -WALL_RISE, 8, 16, '#8a95aa');
-    stars(ctx, seed, 5, -WALL_RISE, 6, 16);
-  }
-}
+  // ---- the slim solid with its rounded cap ----
+  wallSolid(base, wallOutline(map, x, y), last);
+  const FY = frontOf(map, x, y); // front face plane (null: no front here)
+  const fx0 = L ? 0 : WA;
+  const fx1 = R ? 16 : WB;
+  const full = fx0 === 0 && fx1 === 16;
 
-// ---------------- furniture ----------------
-
-function drawFurniture(ctx: Ctx, c: string, x: number, y: number, map?: OfficeMap) {
-  const rnd = hash('f', x, y);
-  switch (c) {
-    case 'B': {
-      // data-archive rack: slots of data cartridges with glowing tips
-      box(ctx, 1, -14, 14, 3, 27, '#4a4a50', '#2a2a2f');
-      r(ctx, 2, -10, 12, 24, '#18181c');
-      const glow = ['#ffb35a', '#5fd4e0', '#e8534a', '#9be870'];
-      for (const row of [-10, -2, 6]) {
-        for (let i = 0; i < 6; i++) {
-          const k = hash(rnd, row, i);
-          if (k % 6 === 0) continue; // a missing cartridge
-          r(ctx, 2 + i * 2, row + 1, 2, 6, k % 2 ? '#5a5650' : '#6a645a');
-          r(ctx, 2 + i * 2, row + 1, 2, 1, glow[k % glow.length]);
+  // ---- front face details ----
+  const glass = glassOf(map, x, y);
+  if (glass?.kind === 'front' && FY !== null) {
+    // a viewport: a deep, sloped frame around glass looking out into space
+    const g = glass;
+    frontRecess(base, g.xa, g.xb, WIN_Z0, WIN_Z1, WIN_D, 1.3, SPACE, FRAME, { l: g.l, r: g.r, emissive: true, y: FY, layer: 2 });
+    if (!g.l) det.box(-0.6, FY - WIN_D - 0.1, WIN_Z0, 1.2, WIN_D + 0.1, WIN_Z1 - WIN_Z0, FRAME, { jitter: 0, layer: 2 });
+    // a sill ledge under the glass
+    det.box(g.l ? g.xa - 0.5 : 0, FY - 0.4, 0.7, (g.r ? g.xb + 0.5 : 16) - (g.l ? g.xa - 0.5 : 0), 1.0, 0.6, shade(FRAME, -0.1), { jitter: 0, layer: 2, bevel: 0.25, bevelH: 0.2 });
+  } else if (glass?.kind === 'side') {
+    // a viewport in the right-hand side of a north-south wall
+    const g = glass;
+    const fr = (y0: number, y1: number, z0: number, z1: number, xx: number, col: string, o: object) =>
+      base.face([[xx, y0, z0], [xx, y1, z0], [xx, y1, z1], [xx, y0, z1]], col, { twoSided: false, toward: [1, 0, 0], jitter: 0, layer: 2, ...o });
+    fr(g.y0 - 0.8, g.y1 + 0.8, g.z0 - 0.8, g.z1 + 0.8, WB + 0.03, FRAME, {});
+    fr(g.y0, g.y1, g.z0, g.z1, g.x, SPACE, { emissive: true, layer: 3 });
+  } else if (FY !== null && full) {
+    const run = faceRun(map, x, y);
+    const runL = x > run[0];
+    const runR = x < run[1];
+    const k = hash('wall', x, y);
+    const Y = { y: FY, layer: 2 };
+    // kick band along the floor
+    frontRecess(base, 0, 16, 0.3, 1.7, 0.35, 0.45, '#24252a', shade(BULKHEAD, -0.1), { l: !runL, r: !runR, ...Y });
+    if (last) {
+      // the outer hull: plain, heavy plating
+      for (const px of [0.6, 8.6]) frontRecess(base, px, px + 6.8, 2.6, 9.2, 0.5, 0.7, shade(HULL, -0.1), HULL, Y);
+    } else {
+      // two inset panels per tile with sloped sides
+      const pk = shade(BULKHEAD, -0.22);
+      frontRecess(base, 0.6, 7.4, PZ0, PZ1, 0.6, 0.8, pk, BULKHEAD, Y);
+      const special = k % 7;
+      if (special === 2) {
+        // control panel with indicator lights
+        const rc = frontRecess(base, 8.6, 15.4, PZ0, PZ1, 0.7, 0.85, '#1b1c21', BULKHEAD, Y);
+        for (const [lx, col, rgb] of [[10.6, '#e8534a', '232,83,74'], [12.4, '#58e07a', '88,224,122']] as Array<[number, string, string]>) {
+          const lz = rc.izb - 0.9;
+          det.face([[lx - 0.45, rc.Yb + 0.02, lz - 0.45], [lx + 0.45, rc.Yb + 0.02, lz - 0.45], [lx + 0.45, rc.Yb + 0.02, lz + 0.45], [lx - 0.45, rc.Yb + 0.02, lz + 0.45]], col, { emissive: true, layer: 3 });
+          const [sx, sy] = project([lx, rc.Yb, lz]);
+          glows.push(() => glow(ctx, sx, sy, 1.8, rgb, 0.4));
         }
-        r(ctx, 2, row + 7, 12, 1, '#3e3e44');
-      }
-      break;
-    }
-    case 'S': {
-      // server rack / power cell bank: heavy casing, vents, cable bundle
-      box(ctx, 1, -14, 14, 2, 29, '#44464e', '#17181c');
-      r(ctx, 2, -11, 12, 25, '#202127');
-      for (let i = 0; i < 6; i++) {
-        r(ctx, 3, -10 + i * 4, 10, 3, '#2d2f37');
-        r(ctx, 3, -10 + i * 4, 10, 1, '#3d4049');
-        r(ctx, 4, -9 + i * 4, 5, 1, '#121316'); // vents
-      }
-      r(ctx, 13, -6, 1, 20, '#3a2a22'); // cable bundle
-      r(ctx, 14, -2, 1, 16, '#2a3a26');
-      break;
-    }
-    case 'M': {
-      // stacked cargo crates with stencil marks and hazard stripes
-      const crate = (cx: number, cy: number, w: number, hh: number, col: string) => {
-        box(ctx, cx, cy, w, 2, hh, shade(col, 0.15), col);
-        r(ctx, cx + 1, cy + 3, w - 2, 1, shade(col, -0.25));
-        r(ctx, cx + 1, cy + 2 + hh - 2, w - 2, 1, shade(col, -0.25));
-      };
-      const k = hash(rnd, 'crate');
-      crate(0, 2, 9, 11, k % 2 ? '#6b6250' : '#5a5f52');
-      crate(8, 4, 8, 9, k % 3 ? '#7a5a3a' : '#5a5250');
-      crate(2, -7, 7, 8, '#6a5a44');
-      r(ctx, 3, 8, 3, 1, '#d9a53a'); // stencil marks
-      r(ctx, 10, 9, 4, 1, '#e8e2d0');
-      for (let i = 0; i < 7; i += 2) r(ctx, 2 + i, -2, 1, 1, '#d9a53a');
-      break;
-    }
-    case 'd': {
-      // console desk: angled control panel with chunky buttons, CRT-style monitor
-      box(ctx, 0, 4, 16, 7, 5, '#8c8a86', '#55534f');
-      r(ctx, 0, 11, 16, 1, '#3e3c39');
-      r(ctx, 1, 15, 2, 1, '#2e2d2b');
-      r(ctx, 13, 15, 2, 1, '#2e2d2b');
-      // monitor housing (deep, rounded) with amber or green text
-      r(ctx, 7, 3, 2, 4, '#2a2928'); // stand
-      r(ctx, 5, 6, 6, 1, '#2a2928');
-      r(ctx, 3, -5, 10, 9, '#262523'); // housing
-      r(ctx, 3, -5, 10, 1, '#3a3936');
-      const amber = rnd % 3 !== 0;
-      r(ctx, 4, -4, 8, 6, amber ? '#2a1a08' : '#0a2410');
-      const txt = amber ? '#ffb35a' : '#7dff9a';
-      r(ctx, 5, -3, 5, 1, txt);
-      r(ctx, 5, -1, 3, 1, txt);
-      r(ctx, 5, 1, 6, 1, amber ? 'rgba(255,179,90,0.5)' : 'rgba(125,255,154,0.5)');
-      // button panel + keyboard
-      r(ctx, 3, 8, 8, 2, '#3a3936');
-      r(ctx, 3, 8, 8, 1, '#4a4844');
-      for (const [bx, col] of [[12, '#e8534a'], [13, '#d9a53a'], [14, '#58e07a']] as const) r(ctx, bx, 7, 1, 1, col);
-      if (rnd % 2) r(ctx, 12, 9, 2, 2, '#6a645a'); // a mug that has seen better days
-      break;
-    }
-    case 'T': {
-      // metal table with a rounded lip
-      box(ctx, 0, 2, 16, 9, 4, '#9a9690', '#5e5b56');
-      r(ctx, 1, 3, 14, 1, 'rgba(255,255,255,0.12)');
-      r(ctx, 1, 15, 2, 1, '#3a3836');
-      r(ctx, 13, 15, 2, 1, '#3a3836');
-      break;
-    }
-    case 'R': {
-      // the manager's executive desk: dark wood, gold trim
-      box(ctx, 0, -2, 16, 6, 12, '#6b4428', '#3b2416');
-      r(ctx, 0, 8, 16, 1, '#c9a66b');
-      r(ctx, 2, 6, 12, 1, '#4a2e1c');
-      // The manager sits behind the right end of the desk: keep that tile low (papers + nameplate)
-      // so nothing tall stands in front of him.
-      const rightEnd = map ? map.at(x + 1, y) !== 'R' : false;
-      const k = rightEnd ? 2 : hash('desk', x) % 2;
-      if (k === 0) {
-        // desk lamp
-        r(ctx, 3, -6, 1, 5, '#c9a66b');
-        r(ctx, 1, -8, 5, 2, '#2f6b4a');
-      } else if (k === 1) {
-        // holo-display
-        ctx.globalAlpha = 0.6;
-        r(ctx, 4, -9, 8, 6, '#4ff0ff');
-        ctx.globalAlpha = 1;
-        r(ctx, 5, -8, 4, 1, '#e0ffff');
-        r(ctx, 5, -6, 6, 1, '#e0ffff');
-        r(ctx, 7, -3, 2, 1, '#2a303c');
+        det.face([[rc.ixa + 0.3, rc.Yb + 0.02, rc.iza + 0.3], [rc.ixb - 0.3, rc.Yb + 0.02, rc.iza + 0.3], [rc.ixb - 0.3, rc.Yb + 0.02, rc.iza + 0.9], [rc.ixa + 0.3, rc.Yb + 0.02, rc.iza + 0.9]], HAZARD, { layer: 3, jitter: 0 });
+      } else if (special === 4) {
+        // a vent: dark slot with louvres
+        const rc = frontRecess(base, 8.6, 15.4, PZ0, PZ1, 0.7, 0.85, '#202126', BULKHEAD, Y);
+        for (let i = 0; i < 2; i++) {
+          const lz = rc.iza + 0.35 + i * 1.25;
+          det.face([[rc.ixa + 0.2, rc.Yb + 0.02, lz], [rc.ixb - 0.2, rc.Yb + 0.02, lz], [rc.ixb - 0.2, rc.Yb + 0.5, lz + 0.6], [rc.ixa + 0.2, rc.Yb + 0.5, lz + 0.6]], '#4a4c55', { layer: 3, jitter: 0 });
+        }
       } else {
-        // papers + a gold nameplate
-        r(ctx, 2, -1, 5, 3, '#f4f6fa');
-        r(ctx, 9, 0, 5, 2, '#e5b83b');
+        frontRecess(base, 8.6, 15.4, PZ0, PZ1, 0.6, 0.8, pk, BULKHEAD, Y);
       }
-      break;
-    }
-    case 'P': {
-      // alien plant in a pot
-      box(ctx, 4, 9, 8, 2, 5, '#9a7a5e', '#7a5a44');
-      const leaf = rnd % 2 ? '#58b368' : '#7a6fd6';
-      r(ctx, 2, 1, 4, 8, leaf);
-      r(ctx, 10, 0, 4, 9, shade(leaf, -0.1));
-      r(ctx, 5, -6, 6, 15, shade(leaf, 0.12));
-      r(ctx, 6, -6, 2, 10, shade(leaf, 0.3));
-      r(ctx, 7, -8, 2, 2, '#f2d13d');
-      break;
-    }
-    case 'b': {
-      // bunk bed, two tiles wide: frame, mattress and blanket; the pillow sits at the outer end
-      const left = map?.at(x + 1, y) === 'b';
-      box(ctx, 0, 1, 16, 9, 4, '#5a6170', '#3e4450'); // frame
-      r(ctx, 0, 2, 16, 7, '#c9cfdc'); // mattress
-      r(ctx, 0, 4, 16, 5, '#4a5a8a'); // blanket
-      r(ctx, 0, 4, 16, 1, '#6274ad');
-      if (left) {
-        r(ctx, 1, 2, 5, 3, '#eef1f7'); // pillow
-        r(ctx, 0, -4, 2, 14, '#3e4450'); // head post
-      } else {
-        r(ctx, 14, -1, 2, 11, '#3e4450'); // foot post
+      // accent light strip: continuous along the run, lit or dimmed per run
+      const rk = hash('run', run[0], y);
+      const on = rk % 3 !== 0;
+      const lightCol = rk % 5 === 0 ? TEAL : AMBER;
+      const rc = frontRecess(base, runL ? 0 : 0.4, runR ? 16 : 15.6, LZ0, LZ1, 0.45, 0.6, '#1d1e22', shade(BULKHEAD, -0.05), { l: !runL, r: !runR, ...Y });
+      const lz0 = rc.iza + 0.12;
+      const lz1 = rc.izb - 0.12;
+      det.face([[rc.ixa, rc.Yb + 0.02, lz0], [rc.ixb, rc.Yb + 0.02, lz0], [rc.ixb, rc.Yb + 0.02, lz1], [rc.ixa, rc.Yb + 0.02, lz1]], on ? lightCol : shade(lightCol, -0.6), { emissive: true, layer: 3 });
+      if (on) {
+        glows.push(() => {
+          const g = ctx.createLinearGradient(0, FY - LZ0, 0, FY - LZ0 + 2.5);
+          g.addColorStop(0, lightCol === TEAL ? 'rgba(95,212,224,0.24)' : 'rgba(255,179,90,0.22)');
+          g.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(SKEW * LZ0, FY - LZ0, 16, 2.5);
+        });
       }
-      break;
-    }
-    case 's': {
-      // sofa: backrest + seat
-      box(ctx, 0, -3, 16, 2, 7, '#7e45b0', '#5e2f8e');
-      box(ctx, 0, 5, 16, 5, 5, '#a46ad6', '#6e3a9e');
-      r(ctx, 7, 5, 1, 5, '#8a4fbf');
-      break;
-    }
-    case 'W': {
-      // whiteboard on legs
-      r(ctx, 2, 8, 1, 8, '#7a8599');
-      r(ctx, 13, 8, 1, 8, '#7a8599');
-      r(ctx, 0, -9, 16, 17, '#9aa3b3');
-      r(ctx, 1, -8, 14, 14, '#f4f6fa');
-      const ink = ['#e8534a', '#3aa7e0', '#2fb39a'][rnd % 3];
-      r(ctx, 2, -6 + (rnd % 2), 8, 1, ink);
-      r(ctx, 3, -3, 10, 1, ink);
-      r(ctx, 2, 0, 5, 1, '#555');
-      r(ctx, 3, 2, 7, 1, '#555');
-      if (rnd % 2) {
-        r(ctx, 11, -6, 3, 3, ink);
-        r(ctx, 12, -5, 1, 1, '#f4f6fa');
+      // a pipe along some runs, with a clamp on every tile
+      if (rk % 4 === 1 && run[1] > run[0]) {
+        const px0 = runL ? 0 : 0.8;
+        const px1 = runR ? 16 : 15.2;
+        det.push().translate(px0, FY + 0.45, 9.15).rotateY(Math.PI / 2).cylinder(0, 0, 0, 0.55, 0.55, px1 - px0, 6, '#6e675e', { jitter: 0, layer: 2, rot: 0 }).pop();
+        det.box(7, FY - 0.3, 8.35, 2, 1.5, 1.6, '#4a443e', { jitter: 0, layer: 3, bevel: 0.3, bevelH: 0.3 });
       }
-      r(ctx, 0, 6, 16, 2, '#7a8599'); // marker tray
-      break;
-    }
-    case 'K': {
-      // coffee machine
-      box(ctx, 2, -9, 12, 2, 22, '#444b5c', '#2b2f3a');
-      r(ctx, 4, -5, 8, 4, '#151820');
-      r(ctx, 5, -4, 4, 2, '#58e07a'); // display
-      r(ctx, 11, -4, 1, 1, '#e8534a');
-      r(ctx, 5, 3, 6, 8, '#151820');
-      r(ctx, 6, 7, 4, 4, '#f4f6fa');
-      r(ctx, 6, 7, 4, 1, '#6b3f1d');
-      break;
-    }
-    case 'J': {
-      // jukebox: rounded top, light bands (animated in the evening by the renderer), speaker grille
-      box(ctx, 2, -10, 12, 2, 24, '#7a3b8f', '#4a1f5c');
-      r(ctx, 3, -11, 10, 2, '#7a3b8f');
-      r(ctx, 4, -12, 8, 1, '#9a55b0');
-      r(ctx, 4, -8, 8, 6, '#1a0f22'); // record window
-      r(ctx, 6, -7, 4, 4, '#2a2a33');
-      r(ctx, 7, -6, 2, 2, '#e8534a');
-      for (const [i, c] of ['#f2d13d', '#e05fae', '#53c7d6'].entries()) r(ctx, 3, -1 + i * 2, 10, 1, c);
-      for (let gy = 6; gy < 12; gy += 2) r(ctx, 4, gy, 8, 1, '#2e1838'); // grille
-      break;
-    }
-    case 'Q': {
-      // beer taps on a bar counter, with a full mug
-      box(ctx, 0, 2, 16, 6, 8, '#8a5a3a', '#5a3a24');
-      r(ctx, 0, 11, 16, 1, '#c9a66b'); // brass rail
-      for (const tx of [3, 7]) {
-        r(ctx, tx, -4, 2, 7, '#c9ced8'); // chrome tap
-        r(ctx, tx, -5, 2, 1, '#eef0f4');
-        r(ctx, tx - 1, -7, 4, 2, tx === 3 ? '#e8534a' : '#3aa7e0'); // handle
+      // rust streak under a seam
+      if (k % 6 === 3) {
+        const sx = 7.6 + (k % 3) * 0.3;
+        det.face([[sx - 0.5, FY + 0.02, 6.2], [sx + 0.5, FY + 0.02, 6.2], [sx + 0.25, FY + 0.02, 2.6], [sx - 0.1, FY + 0.02, 2.0]], '#8c461e', { emissive: true, alpha: 0.35, layer: 3 });
       }
-      r(ctx, 11, -1, 4, 5, '#f2b13d'); // mug
-      r(ctx, 11, -2, 4, 2, '#fffbe8'); // foam
-      r(ctx, 15, 0, 1, 3, '#d8dde6'); // handle
-      break;
-    }
-    case 'F': {
-      // fridge
-      box(ctx, 2, -14, 12, 2, 28, '#ffffff', '#dde2ea');
-      r(ctx, 2, -3, 12, 1, '#9aa3b3');
-      r(ctx, 11, -9, 1, 4, '#9aa3b3');
-      r(ctx, 11, 0, 1, 6, '#9aa3b3');
-      break;
-    }
-    case 'H': {
-      // holo-projector pad: a faint cone of light with a small ringed planet floating in it
-      box(ctx, 3, 9, 10, 2, 4, '#4a4c54', '#2c2e34');
-      r(ctx, 4, 9, 8, 1, '#5fd4e0');
-      r(ctx, 5, 10, 1, 1, '#d9a53a');
-      r(ctx, 10, 10, 1, 1, '#d9a53a');
-      ctx.globalAlpha = 0.18;
-      r(ctx, 5, -6, 6, 15, '#6fe6ff');
-      ctx.globalAlpha = 0.75;
-      r(ctx, 6, -5, 4, 4, '#6fd0ff'); // planet
-      r(ctx, 6, -5, 2, 2, '#bff2ff');
-      r(ctx, 4, -3, 8, 1, '#a0f0ff'); // ring
-      ctx.globalAlpha = 1;
-      break;
-    }
-    case 'A': {
-      // comm dish on a pole
-      box(ctx, 4, 12, 8, 1, 3, '#4a5366', '#3a4252');
-      r(ctx, 7, 0, 2, 12, '#7a8599');
-      r(ctx, 1, -9, 14, 9, '#d6dbe4');
-      r(ctx, 3, -8, 10, 7, '#aab3c2');
-      r(ctx, 1, -1, 14, 1, '#9aa3b3');
-      r(ctx, 7, -12, 2, 5, '#7a8599');
-      r(ctx, 7, -13, 2, 1, '#e8534a');
-      break;
     }
   }
+
+  // ---- door posts: a chunky, rounded post where a wall meets a doorway ----
+  const post = (x0: number, y0: number, x1: number, y1: number, stripes: boolean) => {
+    det.box(x0, y0, 0, x1 - x0, y1 - y0, H + 0.9, JAMB, { chamfer: 0.9, bevel: 0.9, bevelH: 0.8, jitter: 0, layer: 2 });
+    if (stripes) faceStripes(det, x0 + 0.9, x1 - 0.9, y1 + 0.02, 1.0, 9.6, 3);
+  };
+  if (isDoor(map.at(x + 1, y))) post(16 - 2.6, WA - 0.9, 16.4, WB + 0.9, true);
+  if (isDoor(map.at(x - 1, y))) post(-0.4, WA - 0.9, 2.6, WB + 0.9, true);
+  if (!last && isDoor(below)) post(WA - 0.9, 16 - 2.6, WB + 0.9, 16.4, true);
+  if (isDoor(map.at(x, y - 1))) post(WA - 0.9, -0.4, WB + 0.9, 2.6, false);
+
+  // ---- the secret door: a barely-there panel and a faint glyph only insiders notice ----
+  if (c === 'X') {
+    const side = !R; // the right-hand face shows on a north-south wall
+    const pz = 8.4;
+    if (side) {
+      base.face([[WB + 0.03, 4, 0], [WB + 0.03, 12, 0], [WB + 0.03, 12, pz], [WB + 0.03, 4, pz]], shade(BULKHEAD, -0.12), { twoSided: false, toward: [1, 0, 0], jitter: 0, layer: 2 });
+    } else if (FY !== null) {
+      base.face([[4, FY + 0.03, 0], [12, FY + 0.03, 0], [12, FY + 0.03, pz], [4, FY + 0.03, pz]], shade(BULKHEAD, -0.12), { jitter: 0, layer: 2 });
+    }
+    const gx0 = 8;
+    det.face([[gx0, 6.6, H + 0.02], [gx0 + 0.7, 8, H + 0.02], [gx0, 9.4, H + 0.02], [gx0 - 0.7, 8, H + 0.02]], '#b07cff', { emissive: true, alpha: 0.75, layer: 3 });
+    const [gx, gy] = project([gx0, 8, H]);
+    glows.push(() => glow(ctx, gx, gy, 2.4, '176,124,255', 0.22));
+  }
+
+  // ---- draw: solid, then glass contents, then details and glows ----
+  base.draw(ctx);
+  if (glass) {
+    const seed = hash('star', x, y);
+    ctx.save();
+    if (glass.kind === 'front') {
+      // the back plane y = g.y, mapped so that local (x, v) = (x, -z)
+      ctx.transform(1, 0, -SKEW, 1, 0, glass.y);
+      stars(ctx, seed, glass.x0, -glass.z1, glass.x1 - glass.x0, glass.z1 - glass.z0);
+    } else {
+      // the side plane x = g.x, mapped so that local (u, v) = (y, -z)
+      ctx.transform(0, 1, -SKEW, 1, glass.x, 0);
+      stars(ctx, seed, glass.y0, -glass.z1, glass.y1 - glass.y0, glass.z1 - glass.z0);
+    }
+    ctx.restore();
+  }
+  det.draw(ctx);
+  for (const f of glows) f();
 }
 
-/** Where the blinking LEDs sit on a server rack, relative to the tile's top-left. */
-export const RACK_LEDS: Array<[number, number]> = [-9, -5, -1, 3, 7, 11].map((y) => [11, y] as [number, number]);
+// Furniture lives in furniture.ts; re-exported so existing imports keep working.
+export { RACK_LEDS } from './furniture';

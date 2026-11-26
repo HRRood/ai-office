@@ -6,8 +6,61 @@ import { displayName, shorten } from '../../../shared/names';
 import { hash, loadMap, type OfficeMap, type Tile } from './map';
 import { HOLIDAY_INFO, HolidayDecor, currentDate, currentHoliday, giftsUnderTree, santaHat, type DecorView, type Holiday } from './holidays';
 import { findPath } from './pathfinding';
-import { ARCHETYPES, SESSION_COLORS, SKINS, getSprite, type Dir, type Frame, type Look } from './sprites';
-import { MAX_RISE, RACK_LEDS, WALL_RISE, renderLayers, type MapLayers } from './tiles';
+import { ARCHETYPES, HEAD_DX, SESSION_COLORS, SKINS, getSprite, type Dir, type Frame, type Look } from './sprites';
+import { MAX_RISE, RACK_LEDS, WALL_RISE, renderLayers, windowGlass, type MapLayers } from './tiles';
+import { HOLO_SCAN, JUKE_BANDS, JUKE_RECORD } from './furniture';
+import { poly, shade, softShadow, type Pt } from './lowpoly';
+
+/** UI font stack for every bit of canvas text. */
+const UI_FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
+
+/**
+ * Cached radial glow sprites ("r,g,b" + falloff), drawn with drawImage + globalAlpha instead of creating
+ * a gradient per light per frame. `soft` falls off linearly; `hot` has a bright core.
+ */
+const glowCache = new Map<string, HTMLCanvasElement>();
+function glowSprite(rgb: string, kind: 'soft' | 'hot' = 'soft'): HTMLCanvasElement {
+  const key = `${rgb}|${kind}`;
+  let c = glowCache.get(key);
+  if (!c) {
+    c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const g2 = c.getContext('2d')!;
+    const g = g2.createRadialGradient(64, 64, 0, 64, 64, 64);
+    g.addColorStop(0, `rgba(${rgb},1)`);
+    if (kind === 'hot') {
+      g.addColorStop(0.18, `rgba(${rgb},0.7)`);
+      g.addColorStop(0.5, `rgba(${rgb},0.18)`);
+    }
+    g.addColorStop(1, `rgba(${rgb},0)`);
+    g2.fillStyle = g;
+    g2.fillRect(0, 0, 128, 128);
+    glowCache.set(key, c);
+  }
+  return c;
+}
+
+/** One cached contact shadow (full alpha), scaled and faded per character. */
+let shadowSprite: HTMLCanvasElement | null = null;
+function contactShadow(): HTMLCanvasElement {
+  if (!shadowSprite) {
+    shadowSprite = document.createElement('canvas');
+    shadowSprite.width = 128;
+    shadowSprite.height = 64;
+    softShadow(shadowSprite.getContext('2d')!, 64, 32, 64, 32, 1);
+  }
+  return shadowSprite;
+}
+
+/** Map sprite-unit coordinates (0..16 across the sprite box) to screen points. */
+function unitPts(x: number, y: number, u: number, pts: Array<[number, number]>): Pt[] {
+  return pts.map(([a, b]) => [x + a * u, y + b * u]);
+}
+
+function hexRgb(hex: string): string {
+  const n = parseInt(hex.slice(1), 16);
+  return `${n >> 16},${(n >> 8) & 255},${n & 255}`;
+}
 
 const WALK_SPEED = 4.2; // tiles per second
 const STEP_FRAMES = [1, 0, 2, 0] as const; // walk cycle
@@ -1084,8 +1137,16 @@ export class OfficeRenderer {
         const x = this.ox + (th.x + dx) * s;
         const y = this.oy + (th.y + 6 * q - arc) * s;
         ctx.globalAlpha = p > 1 ? Math.max(0, 1 - (p - 1) * 4) : 1;
-        ctx.fillStyle = i % 2 ? '#8a5a30' : '#a06a3a';
-        ctx.fillRect(x, y, 1.6 * s, 1.4 * s);
+        // a little round cookie: body plus a lit top-left facet
+        const base = i % 2 ? '#8a5a30' : '#a06a3a';
+        ctx.fillStyle = base;
+        ctx.beginPath();
+        ctx.ellipse(x + 0.8 * s, y + 0.7 * s, 0.8 * s, 0.7 * s, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = shade(base, 0.25);
+        ctx.beginPath();
+        ctx.ellipse(x + 0.6 * s, y + 0.5 * s, 0.4 * s, 0.32 * s, 0, 0, Math.PI * 2);
+        ctx.fill();
       }
     }
     ctx.globalAlpha = 1;
@@ -1106,14 +1167,17 @@ export class OfficeRenderer {
   private draw(t: number) {
     const { ctx, map, scale: s } = this;
     const T = map.tileSize;
-    ctx.imageSmoothingEnabled = false;
+    // Baked art is high-res low-poly now: smooth scaling, not the old pixel grid.
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
     ctx.fillStyle = '#0b1026';
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     ctx.drawImage(this.layers.floor, this.ox, this.oy, map.w * T * s, map.h * T * s);
 
     const sorted = [...this.workers.values()].sort((a, b) => a.y - b.y);
-    for (const w of sorted) this.drawFloorMarker(w, t);
+    for (const w of sorted) this.drawContactShadow(w, t);
     this.drawBossAura(t);
+    for (const w of sorted) this.drawFloorMarker(w, t);
     const view: DecorView = {
       ctx, s, dpr: this.dpr, width: this.canvas.width, height: this.canvas.height,
       px: (tx) => this.px(tx), py: (ty) => this.py(ty),
@@ -1163,7 +1227,7 @@ export class OfficeRenderer {
   }
 
   private font(px: number, weight = 600) {
-    return `${weight} ${px}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+    return `${weight} ${px}px ${UI_FONT}`;
   }
 
   /** Text size in device px: grows with zoom but stays within [min, max] CSS px. */
@@ -1225,10 +1289,19 @@ export class OfficeRenderer {
       const text = cantina ? '🍺 CANTINA' : room.label.toUpperCase();
       const w = ctx.measureText(text).width;
       const active = this.sel.roomId === id || (this.hover?.kind === 'room' && this.hover.roomId === id);
-      ctx.fillStyle = cantina ? 'rgba(40,8,40,0.9)' : active ? 'rgba(20,60,80,0.9)' : 'rgba(8,12,24,0.6)';
+      const ph = size + 6 * this.dpr;
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.3)';
+      ctx.shadowBlur = 6 * this.dpr;
+      ctx.shadowOffsetY = 1.5 * this.dpr;
+      ctx.fillStyle = cantina ? 'rgba(44,10,48,0.86)' : active ? 'rgba(18,58,80,0.88)' : 'rgba(12,16,30,0.62)';
       ctx.beginPath();
-      ctx.roundRect(x - 3 * this.dpr, y - 2 * this.dpr, w + 6 * this.dpr, size + 4 * this.dpr, 3 * this.dpr);
+      ctx.roundRect(x - ph * 0.45, y - 3 * this.dpr, w + ph * 0.9, ph, ph / 2);
       ctx.fill();
+      ctx.restore();
+      ctx.strokeStyle = active ? 'rgba(120,240,255,0.55)' : 'rgba(255,255,255,0.08)';
+      ctx.lineWidth = Math.max(1, this.dpr * 0.8);
+      ctx.stroke();
       if (cantina) {
         // flickering neon
         const on = Math.floor(performance.now() / 90) % 37 !== 0;
@@ -1247,14 +1320,53 @@ export class OfficeRenderer {
     const T = this.map.tileSize;
     const size = (w.isSub ? 12 : 16) * s;
     const moving = w.path.length > 0;
-    const bob = !moving && w.status === 'working' && Math.floor(t / 400) % 2 === 0 ? 1 : 0;
+    // a smooth breathing bob while working (same 800 ms rhythm as the old 1-unit hop)
+    const bob = !moving && w.status === 'working' ? (1 - Math.cos((t / 400) * Math.PI)) / 2 : 0;
     const p0 = this.pokes.get(w.id);
     const p = p0 === undefined ? 1 : (performance.now() - p0) / POKE_MS;
     let hop = p < 1 ? Math.sin(p * Math.PI) * 6 : 0;
     if (p >= 1 && this.partying(w)) hop = Math.abs(Math.sin(((t + (hash(w.id) % 4) * 120) / BEAT_MS) * Math.PI)) * 1.5;
     const x = this.px(w.x) + (T * s - size) / 2;
     const y = this.py(w.y) + (T * s - size) - 3 * s - (bob + hop) * s;
-    return { x, y, size, hop };
+    return { x, y, size, hop, lift: bob + hop };
+  }
+
+  /** Soft contact shadow on the floor under the feet; shrinks and fades as they hop. */
+  private drawContactShadow(w: Worker, t: number) {
+    const { ctx, scale: s } = this;
+    const { x, y, size, lift } = this.spriteBox(w, t);
+    const cx = x + size / 2;
+    const cy = y + size - 1 * s + lift * s; // feet on the floor (sprite unit y ~15)
+    const k = 1 - Math.min(0.45, lift / 10);
+    const rx = size * 0.36 * k;
+    const ry = size * 0.14 * k;
+    const idle = w.status === 'idle' && !w.path.length && !this.partying(w);
+    ctx.globalAlpha = 0.42 * k * (idle ? 0.6 : 1);
+    ctx.drawImage(contactShadow(), cx - rx, cy - ry, rx * 2, ry * 2);
+    ctx.globalAlpha = 1;
+  }
+
+  /** A soft glowing floor ring: wide faint halo plus a crisp core line. */
+  private glowRing(cx: number, cy: number, rx: number, ry: number, color: string, alpha: number, lw: number, dash?: number[], dashOffset = 0) {
+    const { ctx } = this;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineCap = 'round';
+    ctx.globalAlpha = alpha * 0.22;
+    ctx.lineWidth = lw * 3.2;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = alpha;
+    ctx.lineWidth = lw;
+    if (dash) {
+      ctx.setLineDash(dash);
+      ctx.lineDashOffset = dashOffset;
+    }
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
   }
 
   /** Selection/hover ring and pulsing red "waiting" ring under the worker's feet. */
@@ -1265,36 +1377,36 @@ export class OfficeRenderer {
     const cy = y + size - 1 * s + hop * s;
     if (w.status === 'waiting') {
       const p = (t % 1200) / 1200;
-      ctx.strokeStyle = `rgba(232,60,60,${0.9 * (1 - p)})`;
-      ctx.lineWidth = Math.max(1, s * 0.8);
-      ctx.beginPath();
-      ctx.ellipse(cx, cy, size * (0.35 + p * 0.5), size * (0.15 + p * 0.22), 0, 0, Math.PI * 2);
-      ctx.stroke();
+      const rx = size * (0.35 + p * 0.5);
+      const ry = size * (0.15 + p * 0.22);
+      // a soft red pool under the feet plus an expanding ripple
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.35 * (1 - p * 0.5);
+      ctx.drawImage(glowSprite('232,60,60'), cx - size * 0.5, cy - size * 0.22, size, size * 0.44);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+      this.glowRing(cx, cy, rx, ry, '#ff4a4a', 0.9 * (1 - p), Math.max(1, s * 0.7));
     }
     if (this.nearbyId === w.id) {
       const p = 0.5 + 0.5 * Math.sin(t / 220);
-      ctx.strokeStyle = `rgba(255,216,77,${0.55 + 0.4 * p})`;
-      ctx.lineWidth = Math.max(1.5, s * 0.8);
-      ctx.beginPath();
-      ctx.ellipse(cx, cy, size * (0.55 + 0.05 * p), size * 0.23, 0, 0, Math.PI * 2);
-      ctx.stroke();
+      this.glowRing(cx, cy, size * (0.55 + 0.05 * p), size * 0.23, '#ffd84d', 0.55 + 0.4 * p, Math.max(1.5, s * 0.7));
     }
     const exact = this.sel.workerId === w.id;
     const family = !exact && this.sel.sessionId === w.sessionId;
     const hovered = this.hover?.kind === 'worker' && this.hover.workerId === w.id;
     if (exact || family || hovered) {
-      ctx.strokeStyle = w.look.color;
-      ctx.globalAlpha = exact ? 1 : family ? 0.45 : 0.7;
-      ctx.lineWidth = Math.max(1, s * (exact ? 0.8 : 0.5));
+      const alpha = exact ? 1 : family ? 0.45 : 0.7;
+      const lw = Math.max(1, s * (exact ? 0.7 : 0.45));
       if (exact) {
-        ctx.setLineDash([3 * s, 2 * s]);
-        ctx.lineDashOffset = -t / 60;
+        // a faint filled disc in the session color under the selected worker
+        ctx.globalAlpha = 0.16;
+        ctx.fillStyle = w.look.color;
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, size * 0.5, size * 0.21, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
       }
-      ctx.beginPath();
-      ctx.ellipse(cx, cy, size * 0.5, size * 0.21, 0, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.globalAlpha = 1;
+      this.glowRing(cx, cy, size * 0.5, size * 0.21, w.look.color, alpha, lw, exact ? [2.2 * s, 1.6 * s] : undefined, -t / 60);
     }
   }
 
@@ -1314,9 +1426,10 @@ export class OfficeRenderer {
       dir = (['down', 'left', 'down', 'right'] as const)[Math.floor(beat / 2) % 4];
     }
     ctx.globalAlpha = w.status === 'idle' && !w.path.length && !party ? 0.6 : 1;
-    ctx.drawImage(getSprite(w.look, dir, frame), Math.round(x), Math.round(y), size, size);
+    // no pixel snapping: the baked sprite is high-res and smoothly scaled
+    ctx.drawImage(getSprite(w.look, dir, frame), x, y, size, size);
     ctx.globalAlpha = 1;
-    if (this.holiday === 'christmas' && !isNpc(w.id)) santaHat(ctx, Math.round(x), Math.round(y), size, dir === 'left');
+    if (this.holiday === 'christmas' && !isNpc(w.id)) santaHat(ctx, x, y, size, dir === 'left');
     if (party) this.drawBeer(w, t, dir);
   }
 
@@ -1335,14 +1448,32 @@ export class OfficeRenderer {
     if (flip) hx = 16 - hx - 3;
     const mx = x + hx * u;
     const my = y + hy * u;
-    ctx.fillStyle = '#f2b13d';
-    ctx.fillRect(mx, my + u, 3 * u, 3 * u); // beer
+    const P = (pts: Array<[number, number]>) => unitPts(mx, my, u, pts);
+    // handle: a rounded loop on the outer side
+    ctx.strokeStyle = '#d8dde6';
+    ctx.lineWidth = 0.55 * u;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    const hxc = flip ? mx : mx + 3 * u;
+    ctx.ellipse(hxc, my + 2.3 * u, 0.85 * u, 0.9 * u, 0, flip ? Math.PI / 2 : -Math.PI / 2, flip ? (Math.PI * 3) / 2 : Math.PI / 2);
+    ctx.stroke();
+    // glass body: slightly tapered, lit on the left, shaded on the right
+    poly(ctx, P([[0, 0.9], [3, 0.9], [2.85, 4], [0.15, 4]]), '#f2b13d');
+    poly(ctx, P([[2.1, 0.9], [3, 0.9], [2.85, 4], [2.05, 4]]), shade('#f2b13d', -0.22));
+    poly(ctx, P([[0, 0.9], [0.7, 0.9], [0.75, 4], [0.15, 4]]), shade('#f2b13d', 0.2));
+    poly(ctx, P([[0.15, 3.6], [2.85, 3.6], [2.85, 4], [0.15, 4]]), shade('#f2b13d', -0.35)); // thick base
+    // foam: a few faceted puffs
     ctx.fillStyle = '#fffbe8';
-    ctx.fillRect(mx, my, 3 * u, 1.2 * u); // foam
-    ctx.fillStyle = '#d8dde6';
-    ctx.fillRect(flip ? mx - u : mx + 3 * u, my + 1.5 * u, u, 1.5 * u); // handle
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
-    ctx.fillRect(mx + 0.5 * u, my + 1.5 * u, 0.6 * u, 2 * u); // glass glint
+    ctx.beginPath();
+    ctx.ellipse(mx + 1.5 * u, my + 0.75 * u, 1.65 * u, 0.7 * u, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(mx + 0.9 * u, my + 0.35 * u, 0.6 * u, 0, Math.PI * 2);
+    ctx.moveTo(mx + 2.55 * u, my + 0.3 * u);
+    ctx.arc(mx + 2.0 * u, my + 0.3 * u, 0.55 * u, 0, Math.PI * 2);
+    ctx.fill();
+    poly(ctx, P([[1.6, 0.8], [3.1, 0.7], [2.7, 1.3], [1.4, 1.35]]), '#e9e0c4'); // foam underside in shade
+    poly(ctx, P([[0.45, 1.4], [0.95, 1.4], [0.85, 3.4], [0.45, 3.4]]), 'rgba(255,255,255,0.45)'); // glint
   }
 
   /** Seated at a desk in the dev room, working, not walking, not being poked. */
@@ -1360,9 +1491,14 @@ export class OfficeRenderer {
     const sx = this.px(dx) + 4 * s;
     const sy = this.py(dy) - 4 * s;
     ctx.fillStyle = '#0d1626';
-    ctx.fillRect(sx, sy, 8 * s, 6 * s);
+    ctx.beginPath();
+    ctx.roundRect(sx, sy, 8 * s, 6 * s, 0.6 * s);
+    ctx.fill();
+    // a faint diagonal sheen across the glass
+    poly(ctx, [[sx + 0.6 * s, sy], [sx + 3.2 * s, sy], [sx + 1.2 * s, sy + 6 * s], [sx, sy + 6 * s], [sx, sy + 0.6 * s]], 'rgba(130,170,255,0.06)');
     const palette = ['#c792ea', '#82aaff', '#c3e88d', '#f78c6c', '#89ddff', '#ffcb6b'];
     const line = Math.floor(t / 260); // a new line every ~quarter second
+    const lh = 0.8 * s;
     for (let i = 0; i < 3; i++) {
       const n = line + i;
       const indent = hash(w.id, n, 'i') % 3;
@@ -1370,16 +1506,23 @@ export class OfficeRenderer {
       // the newest (bottom) line grows as it's being typed
       const shown = i === 2 ? Math.min(len, 1 + Math.floor(((t % 260) / 260) * len)) : len;
       ctx.fillStyle = palette[hash(w.id, n, 'c') % palette.length];
-      ctx.fillRect(sx + indent * s, sy + (1 + i * 2) * s, shown * s, s);
+      ctx.beginPath();
+      ctx.roundRect(sx + (indent + 0.5) * s, sy + (1.1 + i * 2) * s, (shown - 0.2) * s, lh, lh / 2);
+      ctx.fill();
     }
     // blinking cursor
     if (Math.floor(t / 300) % 2) {
       ctx.fillStyle = '#e8eefc';
-      ctx.fillRect(sx + 7 * s, sy + 5 * s, s * 0.6, s);
+      ctx.beginPath();
+      ctx.roundRect(sx + 7 * s, sy + 4.9 * s, s * 0.5, s * 0.9, s * 0.2);
+      ctx.fill();
     }
-    // glow on the worker's face side of the desk
-    ctx.fillStyle = 'rgba(120,200,255,0.07)';
-    ctx.fillRect(sx - 2 * s, sy - 1 * s, 12 * s, 8 * s);
+    // soft screen glow spilling onto the desk and the worker
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.16;
+    ctx.drawImage(glowSprite('120,200,255'), sx - 4 * s, sy - 3 * s, 16 * s, 13 * s);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
   }
 
   /** A low red aura pulsing on the floor around the manager's desk. */
@@ -1436,34 +1579,63 @@ export class OfficeRenderer {
     const { ctx } = this;
     const { x, y, size } = this.spriteBox(w, t);
     const u = size / 16;
-    ctx.fillStyle = '#1c1820';
-    ctx.fillRect(x + 2 * u, y - 3 * u, 12 * u, 15 * u);
-    ctx.fillStyle = '#3a2a3a';
-    ctx.fillRect(x + 3 * u, y - 2 * u, 10 * u, 13 * u);
-    ctx.fillStyle = '#4a3a4a';
-    ctx.fillRect(x + 3 * u, y - 2 * u, 10 * u, u);
-    ctx.fillStyle = '#c9a66b';
-    for (const [bx, by] of [[4, 0], [11, 0], [4, 5], [11, 5]]) ctx.fillRect(x + bx * u, y + by * u, u, u); // studs
+    const P = (pts: Array<[number, number]>) => unitPts(x, y, u, pts);
+    const frame = '#1c1820';
+    const leather = '#3a2a3a';
+    // frame: high back with bevelled top corners, right edge in shade
+    poly(ctx, P([[3.2, -3], [12.8, -3], [14, -1.8], [14, 12], [2, 12], [2, -1.8]]), frame);
+    poly(ctx, P([[12.9, -2.6], [14, -1.8], [14, 12], [12.9, 12]]), shade(frame, -0.35));
+    poly(ctx, P([[2, -1.8], [3.2, -3], [3.4, -2.4], [2.6, -1.4], [2.6, 12], [2, 12]]), shade(frame, 0.25));
+    // tufted leather cushion: two columns of facets, lit left, shaded right
+    const rows: Array<[number, number]> = [[-2, 2.5], [2.5, 6.5], [6.5, 11]];
+    rows.forEach(([a, b], i) => {
+      const top = i === 0 ? leather : shade(leather, -0.04 * i);
+      poly(ctx, P([[3, a], [8, a + 0.5], [8, b - 0.2], [3, b]]), shade(top, 0.1));
+      poly(ctx, P([[8, a + 0.5], [13, a], [13, b], [8, b - 0.2]]), shade(top, -0.14));
+    });
+    // top bevel catches the light
+    poly(ctx, P([[3, -2], [13, -2], [12.4, -1.3], [3.6, -1.3]]), '#4a3a4a');
+    // brass studs at the tufts
+    for (const [bx, by] of [[4.5, 0.5], [11.5, 0.5], [4.5, 5.5], [11.5, 5.5]]) {
+      ctx.fillStyle = '#9c7d4a';
+      ctx.beginPath();
+      ctx.arc(x + bx * u, y + by * u, 0.55 * u, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#e8c98a';
+      ctx.beginPath();
+      ctx.arc(x + (bx - 0.18) * u, y + (by - 0.18) * u, 0.25 * u, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
   /** Office chair back, drawn over the seated worker (we see them from behind). */
   private drawChair(w: Worker, t: number) {
     const { ctx } = this;
     const { x, y, size } = this.spriteBox(w, t);
-    const u = size / 16; // one sprite pixel
-    // backrest
-    ctx.fillStyle = '#2a2f3b';
-    ctx.fillRect(x + 4 * u, y + 9 * u, 8 * u, 4 * u);
-    ctx.fillStyle = '#444b5c';
-    ctx.fillRect(x + 4 * u, y + 9 * u, 8 * u, u);
+    const u = size / 16; // one sprite unit
+    const P = (pts: Array<[number, number]>) => unitPts(x, y, u, pts);
+    const back = '#2a2f3b';
+    // post + star base with little casters
+    poly(ctx, P([[7.2, 12.6], [8.8, 12.6], [8.6, 15], [7.4, 15]]), '#1c2029');
+    poly(ctx, P([[4, 15.2], [7.4, 14.6], [8.6, 14.6], [12, 15.2], [11.6, 15.8], [4.4, 15.8]]), '#232833');
+    poly(ctx, P([[4, 15.2], [7.4, 14.6], [8.6, 14.6], [12, 15.2]]), '#3a4150');
+    ctx.fillStyle = '#12151c';
+    for (const cxu of [4.4, 8, 11.6]) {
+      ctx.beginPath();
+      ctx.arc(x + cxu * u, y + 15.9 * u, 0.45 * u, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // backrest: a rounded, bevelled cushion (we see it from behind)
+    poly(ctx, P([[4.8, 9], [11.2, 9], [12, 9.8], [12, 12.4], [11.4, 13], [4.6, 13], [4, 12.4], [4, 9.8]]), back);
+    poly(ctx, P([[4.8, 9], [11.2, 9], [12, 9.8], [4, 9.8]]), '#444b5c'); // lit top bevel
+    poly(ctx, P([[11, 9.8], [12, 9.8], [12, 12.4], [11.4, 13], [11, 13]]), shade(back, -0.3)); // shaded right side
+    poly(ctx, P([[4, 9.8], [4.7, 9.8], [4.7, 13], [4.6, 13], [4, 12.4]]), shade(back, 0.15)); // lit left side
+    ctx.globalAlpha = 0.65;
     ctx.fillStyle = w.look.color; // a stripe in the session color
-    ctx.globalAlpha = 0.6;
-    ctx.fillRect(x + 5 * u, y + 11 * u, 6 * u, u);
+    ctx.beginPath();
+    ctx.roundRect(x + 5 * u, y + 11 * u, 6 * u, 0.9 * u, 0.45 * u);
+    ctx.fill();
     ctx.globalAlpha = 1;
-    // post + wheel base
-    ctx.fillStyle = '#1c2029';
-    ctx.fillRect(x + 7 * u, y + 13 * u, 2 * u, 2 * u);
-    ctx.fillRect(x + 4 * u, y + 15 * u, 8 * u, u);
   }
 
   /** Little code symbols float up from the keyboard while typing. */
@@ -1498,7 +1670,7 @@ export class OfficeRenderer {
     const roomSel = this.sel.roomId;
     for (const w of sorted) {
       const { x, y, size } = this.spriteBox(w, t);
-      const head = { x: x + size / 2, y: y - 1 * s };
+      const head = { x: x + size / 2 + HEAD_DX * (size / 16), y: y - 1 * s };
       const isSel = this.sel.workerId === w.id || this.sel.sessionId === w.sessionId;
       const inSelRoom = roomSel !== null && w.room === roomSel;
 
@@ -1510,7 +1682,8 @@ export class OfficeRenderer {
         (w.id === BOSS_ID && this.openQuestions ? ` ❓${this.openQuestions}` : '') +
         (w.id === BOSS_ID && this.unreadReports ? ` 📄${this.unreadReports}` : '');
       const tagText = (w.status === 'idle' && !party ? `${w.name} · zZ` : w.name) + mail;
-      const tag = { text: tagText, fs: tfs, w: ctx.measureText(tagText).width + tfs * 0.8, h: tfs * 1.4 };
+      // pill: color dot + text, with room for the rounded ends
+      const tag = { text: tagText, fs: tfs, w: ctx.measureText(tagText).width + tfs * 1.85, h: tfs * 1.6 };
 
       let bubble: Callout['bubble'];
       const waiting = w.status === 'waiting';
@@ -1541,8 +1714,8 @@ export class OfficeRenderer {
         bubble = {
           text,
           fs: bfs,
-          w: ctx.measureText(text).width + bfs * 1.1,
-          h: bfs * 1.66,
+          w: Math.max(ctx.measureText(text).width + bfs * 1.5, bfs * 3),
+          h: bfs * 1.8,
           waiting,
           alpha: waiting || fresh || isSel || inSelRoom ? 1 : 0.65,
         };
@@ -1589,34 +1762,47 @@ export class OfficeRenderer {
     ctx.globalAlpha = dimmed ? 0.35 : 1;
 
     // Leader line when the callout had to move away from the head.
+    const baseAlpha = dimmed ? 0.35 : 1;
     if (tagTop + tag.h < head.y - 1) {
       ctx.strokeStyle = w.look.color;
       ctx.lineWidth = Math.max(1, this.dpr);
+      ctx.lineCap = 'round';
+      ctx.globalAlpha = baseAlpha * 0.7;
       ctx.beginPath();
       ctx.moveTo(cx, tagTop + tag.h);
       ctx.lineTo(head.x, head.y);
       ctx.stroke();
+      ctx.fillStyle = w.look.color;
+      ctx.beginPath();
+      ctx.arc(head.x, head.y, Math.max(1.5, this.dpr * 1.6), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = baseAlpha;
     }
 
-    // name tag
+    // name tag: a translucent dark pill with a soft drop shadow and a session-color dot
     const selected = this.sel.workerId === w.id;
+    const tl = cx - tag.w / 2;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.35)';
+    ctx.shadowBlur = 6 * this.dpr;
+    ctx.shadowOffsetY = 1.5 * this.dpr;
+    ctx.fillStyle = selected ? 'rgba(30,42,74,0.92)' : 'rgba(14,18,32,0.76)';
+    ctx.beginPath();
+    ctx.roundRect(tl, tagTop, tag.w, tag.h, tag.h / 2);
+    ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = selected ? w.look.color : 'rgba(255,255,255,0.12)';
+    ctx.lineWidth = Math.max(1, this.dpr * (selected ? 1.2 : 0.8));
+    ctx.stroke();
+    ctx.fillStyle = w.look.color;
+    ctx.beginPath();
+    ctx.arc(tl + tag.fs * 0.78, tagTop + tag.h / 2, tag.fs * 0.26, 0, Math.PI * 2);
+    ctx.fill();
     ctx.font = this.font(tag.fs);
     ctx.textBaseline = 'middle';
-    ctx.textAlign = 'center';
-    ctx.fillStyle = selected ? 'rgba(30,40,70,0.95)' : 'rgba(12,16,28,0.82)';
-    ctx.beginPath();
-    ctx.roundRect(cx - tag.w / 2, tagTop, tag.w, tag.h, tag.h / 3);
-    ctx.fill();
-    if (selected) {
-      ctx.strokeStyle = w.look.color;
-      ctx.lineWidth = Math.max(1, this.dpr);
-      ctx.stroke();
-    }
-    ctx.fillStyle = w.look.color;
-    const bar = Math.max(1, this.dpr);
-    ctx.fillRect(cx - tag.w / 2 + tag.h / 3, tagTop + tag.h - bar, tag.w - (tag.h / 3) * 2, bar);
-    ctx.fillStyle = '#e8eefc';
-    ctx.fillText(tag.text, cx, tagTop + tag.h / 2);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#eef2fb';
+    ctx.fillText(tag.text, tl + tag.fs * 1.25, tagTop + tag.h / 2 + 0.5);
     ctx.textAlign = 'start';
 
     if (!bubble) {
@@ -1628,41 +1814,54 @@ export class OfficeRenderer {
     const left = cx - bubble.w / 2;
     const bottom = top + bubble.h;
     const pulse = bubble.waiting ? 0.5 + 0.5 * Math.sin(t / 160) : 0;
-    ctx.globalAlpha = (dimmed ? 0.35 : 1) * bubble.alpha;
-    ctx.fillStyle = bubble.waiting ? `rgb(${200 + 40 * pulse},${40 + 20 * pulse},48)` : '#f4f6fa';
-    ctx.strokeStyle = bubble.waiting ? '#5a0d12' : 'rgba(12,16,28,0.9)';
-    ctx.lineWidth = Math.max(1, this.dpr);
+    ctx.globalAlpha = baseAlpha * bubble.alpha;
+    // one outline: rounded bubble with the tail pointing down at the name tag (no seams)
+    const bw = bubble.w;
+    const r = Math.max(0, Math.min(bubble.h * 0.42, bw / 2 - tail));
+    const right = left + bw;
     ctx.beginPath();
-    ctx.roundRect(left, top, bubble.w, bubble.h, Math.min(bubble.h / 2.5, 8 * this.dpr));
-    ctx.fill();
-    ctx.stroke();
-    // tail pointing down at the name tag
-    ctx.beginPath();
-    ctx.moveTo(cx - tail, bottom - ctx.lineWidth);
-    ctx.lineTo(cx, bottom + tail);
-    ctx.lineTo(cx + tail, bottom - ctx.lineWidth);
-    ctx.closePath();
-    ctx.fill();
-    ctx.beginPath();
-    ctx.moveTo(cx - tail, bottom);
-    ctx.lineTo(cx, bottom + tail);
+    ctx.moveTo(left + r, top);
+    ctx.arcTo(right, top, right, bottom, r);
+    ctx.arcTo(right, bottom, left, bottom, r);
     ctx.lineTo(cx + tail, bottom);
+    ctx.lineTo(cx, bottom + tail);
+    ctx.lineTo(cx - tail, bottom);
+    ctx.arcTo(left, bottom, left, top, r);
+    ctx.arcTo(left, top, right, top, r);
+    ctx.closePath();
+    ctx.save();
+    ctx.shadowColor = bubble.waiting ? 'rgba(120,0,10,0.45)' : 'rgba(0,0,0,0.38)';
+    ctx.shadowBlur = (bubble.waiting ? 10 + 6 * pulse : 8) * this.dpr;
+    ctx.shadowOffsetY = 2 * this.dpr;
+    ctx.fillStyle = bubble.waiting ? `rgba(${200 + 40 * pulse},${40 + 20 * pulse},52,0.95)` : 'rgba(20,25,42,0.84)';
+    ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = bubble.waiting ? 'rgba(255,190,190,0.45)' : 'rgba(255,255,255,0.14)';
+    ctx.lineWidth = Math.max(1, this.dpr * 0.8);
+    ctx.lineJoin = 'round';
     ctx.stroke();
-    ctx.fillStyle = bubble.waiting ? '#ffffff' : '#141a2b';
+    ctx.fillStyle = bubble.waiting ? '#ffffff' : '#f2f5fc';
     ctx.font = this.font(bubble.fs, 500);
     ctx.textBaseline = 'middle';
-    ctx.fillText(bubble.text, left + bubble.fs * 0.55, top + bubble.h / 2 + 0.5);
+    ctx.textAlign = 'center';
+    ctx.fillText(bubble.text, cx, top + bubble.h / 2 + 0.5);
+    ctx.textAlign = 'start';
 
     // Big pulsing "!" above waiting workers.
     if (bubble.waiting) {
       const fs = bubble.fs * (1.5 + 0.25 * pulse);
       ctx.globalAlpha = 1;
-      ctx.font = this.font(fs, 900);
+      ctx.font = this.font(fs, 800);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
-      ctx.lineWidth = Math.max(2, this.dpr * 2);
+      ctx.lineWidth = Math.max(2, this.dpr * 2.4);
+      ctx.lineJoin = 'round';
       ctx.strokeStyle = '#3a0508';
+      ctx.save();
+      ctx.shadowColor = `rgba(255,60,60,${0.5 + 0.4 * pulse})`;
+      ctx.shadowBlur = (6 + 6 * pulse) * this.dpr;
       ctx.strokeText('!', cx, top - 1 * s);
+      ctx.restore();
       ctx.fillStyle = '#ff4d4d';
       ctx.fillText('!', cx, top - 1 * s);
       ctx.textAlign = 'start';
@@ -1686,15 +1885,7 @@ export class OfficeRenderer {
         if (c === 'S') add(racks, x, y);
         if (c === 'H') add(holos, x, y);
         if (c === 'V') {
-          const wallish = (q: string) => q === '#' || q === 'V';
-          const face = y < this.map.h - 1 && !wallish(this.map.at(x, y + 1));
-          const horiz = wallish(this.map.at(x - 1, y)) || wallish(this.map.at(x + 1, y));
-          const g = face
-            ? { gx: 1, gy: -WALL_RISE + 3, gw: 14, gh: 14 - (-WALL_RISE + 3) }
-            : horiz
-              ? { gx: 0, gy: -WALL_RISE + 5, gw: 16, gh: 7 }
-              : { gx: 5, gy: -WALL_RISE, gw: 6, gh: 16 };
-          windows.set(y, [...(windows.get(y) ?? []), { x, ...g }]);
+          windows.set(y, [...(windows.get(y) ?? []), { x, ...windowGlass(this.map, x, y) }]);
         }
         if (c === 'J') {
           jukes.push([x, y]);
@@ -1713,25 +1904,74 @@ export class OfficeRenderer {
   /** Blinking rack LEDs and hologram shimmer for objects based in row `row`. */
   private drawAnimatedRow(row: number, t: number) {
     const { ctx, scale: s } = this;
-    const colors = ['#58e07a', '#f2d13d', '#3aa7e0', '#e8534a'];
+    const colors = ['88,224,122', '242,209,61', '58,167,224', '232,83,74'];
     for (const [x, y] of this.animated.racks.get(row) ?? []) {
       RACK_LEDS.forEach(([lx, ly], i) => {
         const h = hash(x, y, i);
         const on = Math.floor(t / (180 + (h % 500)) + (h % 7)) % 3 !== 0;
-        ctx.fillStyle = on ? colors[h % 4] : '#10141c';
-        ctx.fillRect(this.px(x) + lx * s, this.py(y) + ly * s, s, s);
+        // LED centred in its old 1x1 anchor cell
+        const cx = this.px(x) + (lx + 0.5) * s;
+        const cy = this.py(y) + (ly + 0.5) * s;
+        if (on) {
+          const c = colors[h % 4];
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalAlpha = 0.5;
+          ctx.drawImage(glowSprite(c, 'hot'), cx - 2.2 * s, cy - 2.2 * s, 4.4 * s, 4.4 * s);
+          ctx.globalAlpha = 1;
+          ctx.globalCompositeOperation = 'source-over';
+          ctx.fillStyle = `rgb(${c})`;
+          ctx.beginPath();
+          ctx.arc(cx, cy, 0.42 * s, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = 'rgba(255,255,255,0.75)';
+          ctx.beginPath();
+          ctx.arc(cx - 0.1 * s, cy - 0.1 * s, 0.17 * s, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          ctx.fillStyle = 'rgba(16,20,28,0.85)';
+          ctx.beginPath();
+          ctx.arc(cx, cy, 0.4 * s, 0, Math.PI * 2);
+          ctx.fill();
+        }
       });
     }
     if (this.evening)
       for (const [x, y] of this.animated.jukes.filter(([, jy]) => jy === row)) {
         const beat = Math.floor(t / BEAT_MS);
-        for (let i = 0; i < 3; i++) {
-          ctx.fillStyle = `rgb(${DISCO[(beat + i) % DISCO.length]})`;
-          ctx.fillRect(this.px(x) + 3 * s, this.py(y) + (-1 + i * 2) * s, 10 * s, s);
-        }
-        // spinning record
+        const pulse = 1 - (t % BEAT_MS) / BEAT_MS;
+        JUKE_BANDS.forEach(([jx, jy, jw, jh], i) => {
+          const c = DISCO[(beat + i) % DISCO.length];
+          const bx = this.px(x) + jx * s;
+          const by = this.py(y) + jy * s;
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalAlpha = 0.35 + 0.25 * pulse;
+          ctx.drawImage(glowSprite(c), bx - 1.5 * s, by - 1.2 * s, (jw + 3) * s, (jh + 2.4) * s);
+          ctx.globalAlpha = 1;
+          ctx.globalCompositeOperation = 'source-over';
+          ctx.fillStyle = `rgb(${c})`;
+          ctx.beginPath();
+          ctx.roundRect(bx, by, jw * s, jh * s, (jh / 2) * s);
+          ctx.fill();
+        });
+        // spinning record label: a disc with a sweeping highlight wedge
+        const rcx = this.px(x) + JUKE_RECORD[0] * s;
+        const rcy = this.py(y) + JUKE_RECORD[1] * s;
+        const rr = JUKE_RECORD[2] * s;
         ctx.fillStyle = beat % 2 ? '#e8534a' : '#f2d13d';
-        ctx.fillRect(this.px(x) + 7 * s, this.py(y) - 6 * s, 2 * s, 2 * s);
+        ctx.beginPath();
+        ctx.arc(rcx, rcy, rr, 0, Math.PI * 2);
+        ctx.fill();
+        const spin = t / 180;
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.beginPath();
+        ctx.moveTo(rcx, rcy);
+        ctx.arc(rcx, rcy, rr, spin, spin + 0.9);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#1a1420';
+        ctx.beginPath();
+        ctx.arc(rcx, rcy, rr * 0.28, 0, Math.PI * 2);
+        ctx.fill();
       }
     // Every couple of minutes the station makes a jump: stars stretch into streaks in every viewport.
     const JUMP_EVERY = 150_000;
@@ -1749,22 +1989,46 @@ export class OfficeRenderer {
         ctx.clip();
         ctx.fillStyle = `rgba(40,60,120,${0.35 * intensity})`;
         ctx.fillRect(ox, oy, wdw.gw * s, wdw.gh * s);
+        ctx.globalCompositeOperation = 'lighter';
+        // a soft blue-white flash in the glass at the peak of the jump
+        ctx.globalAlpha = 0.35 * intensity;
+        ctx.drawImage(glowSprite('150,190,255'), ox - wdw.gw * 0.25 * s, oy - wdw.gh * 0.25 * s, wdw.gw * 1.5 * s, wdw.gh * 1.5 * s);
+        ctx.globalAlpha = 1;
         for (let i = 0; i < 6; i++) {
           const k = hash(wdw.x, row, i);
           const ly = oy + ((k % 100) / 100) * wdw.gh * s;
           const len = (4 + (k % 10)) * s * (0.4 + 2.6 * intensity);
           const lx = ox + (((k >> 7) % 100) / 100) * wdw.gw * s - len / 2 + p * 6 * s;
+          const th = Math.max(0.5, s * 0.32);
+          // tapered streak: thin tail on the left, bright rounded head on the right
           ctx.fillStyle = i % 3 === 0 ? `rgba(190,220,255,${0.9 * intensity})` : `rgba(255,255,255,${0.75 * intensity})`;
-          ctx.fillRect(lx, ly, len, Math.max(1, s * 0.6));
+          ctx.beginPath();
+          ctx.moveTo(lx, ly);
+          ctx.lineTo(lx + len - th, ly - th);
+          ctx.arc(lx + len - th, ly, th, -Math.PI / 2, Math.PI / 2);
+          ctx.closePath();
+          ctx.fill();
         }
+        ctx.globalCompositeOperation = 'source-over';
         ctx.restore();
       }
     }
     for (const [x, y] of this.animated.holos.get(row) ?? []) {
       const a = 0.25 + 0.2 * Math.sin(t / 300 + x);
-      ctx.fillStyle = `rgba(160,255,255,${a})`;
-      const scan = Math.floor(t / 120 + x) % 8;
-      ctx.fillRect(this.px(x) + 5 * s, this.py(y) + (-6 + scan * 2) * s, 6 * s, s);
+      // a smooth scan band gliding down the light cone (same speed as before)
+      const scan = ((t / 120 + x) % 7) / 7;
+      const cx = this.px(x) + HOLO_SCAN.x * s;
+      const cy = this.py(y) + (HOLO_SCAN.top + scan * (HOLO_SCAN.bottom - HOLO_SCAN.top)) * s;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = a;
+      ctx.drawImage(glowSprite('160,255,255'), cx - 4.5 * s, cy - 1.4 * s, 9 * s, 2.8 * s);
+      ctx.globalAlpha = Math.min(1, a * 1.6);
+      ctx.fillStyle = 'rgba(200,255,255,0.8)';
+      ctx.beginPath();
+      ctx.roundRect(cx - 3 * s, cy - 0.2 * s, 6 * s, 0.4 * s, 0.2 * s);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
     }
   }
 
@@ -1792,18 +2056,19 @@ export class OfficeRenderer {
       const cx = rx + rw * (0.5 + 0.38 * Math.cos(a));
       const cy = ry + rh * (0.5 + 0.35 * Math.sin(a * 1.3));
       const rad = T * s * (1.6 + 0.25 * (1 - beat));
-      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
-      g.addColorStop(0, `rgba(${color},0.32)`);
-      g.addColorStop(1, `rgba(${color},0)`);
-      ctx.fillStyle = g;
-      ctx.fillRect(cx - rad, cy - rad, rad * 2, rad * 2);
+      ctx.globalAlpha = 0.32;
+      // spots land on the floor in 3/4 view: slightly squashed ellipses
+      ctx.drawImage(glowSprite(color), cx - rad, cy - rad * 0.8, rad * 2, rad * 1.6);
     });
+    ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
     ctx.restore();
 
     // music notes rising from each jukebox
     const fs = this.textSize(5, 10, 22);
-    ctx.font = `700 ${fs}px ui-sans-serif, system-ui, sans-serif`;
+    ctx.font = this.font(fs, 700);
+    ctx.shadowColor = 'rgba(255,120,220,0.6)';
+    ctx.shadowBlur = 6 * this.dpr;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     for (const [jx, jy] of this.animated.jukes) {
@@ -1820,6 +2085,8 @@ export class OfficeRenderer {
         ctx.fillText(NOTE_CHARS[hash(n, i, 'n') % NOTE_CHARS.length], bx + wobble + drift, by - phase * 34 * s);
       }
     }
+    ctx.shadowBlur = 0;
+    ctx.shadowColor = 'transparent';
     ctx.globalAlpha = 1;
     ctx.textAlign = 'start';
   }
@@ -1847,12 +2114,11 @@ export class OfficeRenderer {
       const cx = this.px(x + 0.5);
       const cy = this.py(y + 0.4);
       const rad = r * T * s * (0.95 + 0.05 * Math.sin(t / 500 + x * 3));
-      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
-      g.addColorStop(0, `rgba(${color},${0.22 * dark})`);
-      g.addColorStop(1, `rgba(${color},0)`);
-      ctx.fillStyle = g;
-      ctx.fillRect(cx - rad, cy - rad, rad * 2, rad * 2);
+      // cached sprite instead of a gradient per light per frame (same linear falloff)
+      ctx.globalAlpha = 0.22 * dark;
+      ctx.drawImage(glowSprite(color), cx - rad, cy - rad, rad * 2, rad * 2);
     }
+    ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
   }
 }
