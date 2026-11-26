@@ -17,6 +17,7 @@ export const ROOM_IDS = [
   'mailroom',
   'lounge',
   'openOffice',
+  'dorm',
 ] as const;
 
 export type RoomId = (typeof ROOM_IDS)[number];
@@ -32,7 +33,11 @@ export const ROOM_LABELS: Record<RoomId, string> = {
   mailroom: 'Mailroom',
   lounge: 'Lounge',
   openOffice: 'Open Office',
+  dorm: 'Sleeping Quarters', // long-idle sessions sleep here until the guard fetches them
 };
+
+/** Where sessions go after a long time without activity. */
+export const SLEEP_ROOM: RoomId = 'dorm';
 
 /** Exact tool name -> room. */
 export const TOOL_ROOMS: Record<string, RoomId> = {
@@ -164,5 +169,6 @@ export function roomPurpose(room: RoomId): string[] {
   if (tools.length) out.push(tools.join(', '));
   for (const [prefix, r] of TOOL_PREFIX_ROOMS) if (r === room) out.push(`${prefix}* tools`);
   if (room === DEFAULT_ROOM) out.push('any other tool');
+  if (room === SLEEP_ROOM) out.push('sessions idle for a long time (ask the Manager to wake them)');
   return out;
 }

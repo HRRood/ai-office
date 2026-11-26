@@ -8,7 +8,9 @@ const HOOKS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 export const HOOK_SCRIPT = path.join(HOOKS_DIR, 'office-hook.js');
 /** Waits after each finished turn for prompts sent from the office (asyncRewake). */
 export const MAILBOX_SCRIPT = path.join(HOOKS_DIR, 'office-mailbox.js');
-const HOOK_MARKERS = ['office-hook.js', 'office-mailbox.js'];
+/** Lets you answer AskUserQuestion at the Manager (synchronous PreToolUse). */
+export const QUESTION_SCRIPT = path.join(HOOKS_DIR, 'office-question.js');
+const HOOK_MARKERS = ['office-hook.js', 'office-mailbox.js', 'office-question.js'];
 
 // Claude Code honours CLAUDE_CONFIG_DIR; default is ~/.claude
 export const SETTINGS_PATH = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'settings.json');

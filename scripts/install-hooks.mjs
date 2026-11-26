@@ -5,6 +5,7 @@ import {
   EVENTS,
   HOOK_SCRIPT,
   MAILBOX_SCRIPT,
+  QUESTION_SCRIPT,
   SETTINGS_PATH,
   backupSettings,
   readSettings,
@@ -12,7 +13,7 @@ import {
   writeSettings,
 } from './hooks-lib.mjs';
 
-if (!fs.existsSync(HOOK_SCRIPT) || !fs.existsSync(MAILBOX_SCRIPT)) {
+if (!fs.existsSync(HOOK_SCRIPT) || !fs.existsSync(MAILBOX_SCRIPT) || !fs.existsSync(QUESTION_SCRIPT)) {
   console.error(`✖ Hook script not found at ${HOOK_SCRIPT}`);
   process.exit(1);
 }
@@ -59,12 +60,27 @@ settings.hooks.Stop.push({
   ],
 });
 
+// Questions: hand AskUserQuestion to the office so you can answer it at the Manager. Synchronous
+// (it has to return the answers), but it exits at once unless the office page is open.
+settings.hooks.PreToolUse.push({
+  matcher: 'AskUserQuestion',
+  hooks: [
+    {
+      type: 'command',
+      command: nodeCmd,
+      args: [QUESTION_SCRIPT],
+      timeout: 900,
+    },
+  ],
+});
+
 writeSettings(settings);
 
 console.log(`✔ Claude Office hooks installed in ${SETTINGS_PATH}`);
 console.log(`  events: ${EVENTS.join(', ')}`);
 console.log(`  hook:   ${nodeCmd} ${HOOK_SCRIPT}`);
 console.log(`  mailbox (Stop, asyncRewake): ${nodeCmd} ${MAILBOX_SCRIPT}`);
+console.log(`  questions (PreToolUse: AskUserQuestion): ${nodeCmd} ${QUESTION_SCRIPT}`);
 if (backup) console.log(`  backup: ${backup}`);
 if (replaced) console.log(`  (replaced ${replaced} existing Claude Office entries)`);
 console.log('\nNew Claude Code sessions pick this up automatically. Already-running sessions may need a restart.');

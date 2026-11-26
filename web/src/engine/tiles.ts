@@ -27,6 +27,7 @@ const FLOORS: Record<RoomId | 'hall', string> = {
   whiteboard: '#423e48',
   meeting: '#2e3440',
   lounge: '#553834',
+  dorm: '#2f3548',
   hall: '#4e4b46',
 };
 
@@ -122,7 +123,7 @@ function drawFloor(ctx: Ctx, map: OfficeMap, x: number, y: number) {
   const dark = shade(base, -0.22);
   const light = shade(base, 0.1);
 
-  if (room === 'lounge' || room === 'reception') {
+  if (room === 'lounge' || room === 'reception' || room === 'dorm') {
     // worn carpet
     for (let py = 0; py < 16; py += 2) for (let px = (py / 2) % 2; px < 16; px += 2) r(ctx, px, py, 1, 1, shade(base, -0.08));
   } else if (room === 'openOffice' || !room) {
@@ -476,6 +477,21 @@ function drawFurniture(ctx: Ctx, c: string, x: number, y: number, map?: OfficeMa
       r(ctx, 5, -6, 6, 15, shade(leaf, 0.12));
       r(ctx, 6, -6, 2, 10, shade(leaf, 0.3));
       r(ctx, 7, -8, 2, 2, '#f2d13d');
+      break;
+    }
+    case 'b': {
+      // bunk bed, two tiles wide: frame, mattress and blanket; the pillow sits at the outer end
+      const left = map?.at(x + 1, y) === 'b';
+      box(ctx, 0, 1, 16, 9, 4, '#5a6170', '#3e4450'); // frame
+      r(ctx, 0, 2, 16, 7, '#c9cfdc'); // mattress
+      r(ctx, 0, 4, 16, 5, '#4a5a8a'); // blanket
+      r(ctx, 0, 4, 16, 1, '#6274ad');
+      if (left) {
+        r(ctx, 1, 2, 5, 3, '#eef1f7'); // pillow
+        r(ctx, 0, -4, 2, 14, '#3e4450'); // head post
+      } else {
+        r(ctx, 14, -1, 2, 11, '#3e4450'); // foot post
+      }
       break;
     }
     case 's': {

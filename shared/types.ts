@@ -20,6 +20,46 @@ export interface OfficeEvent {
   interrupted?: boolean;
   /** Claude Code's session title, when it has one. */
   title?: string;
+  /** Stop: Claude's final message of the turn, handed to the Manager as a report. */
+  report?: string;
+  /** Working directory (full path; stays on the local server, used to wake a sleeping session). */
+  cwd?: string;
+}
+
+/** One question from Claude's AskUserQuestion tool. */
+export interface AskedQuestion {
+  question: string;
+  header?: string;
+  multiSelect: boolean;
+  options: Array<{ label: string; description?: string }>;
+}
+
+/** An AskUserQuestion call waiting for your answer at the Manager. Kept in server memory only. */
+export interface PendingQuestion {
+  id: string;
+  sessionId: string;
+  /** Session name when it asked. */
+  name: string;
+  project: string;
+  /** Asked by a helper (subagent type), if it wasn't the session itself. */
+  by?: string;
+  ts: number;
+  questions: AskedQuestion[];
+}
+
+/** What a worker says while walking their report over to the Manager. */
+export const REPORT_ACTION = '📄 Handing in my report';
+
+/** A finished turn's final message, delivered to the Manager. Kept in server memory only. */
+export interface Report {
+  id: number;
+  sessionId: string;
+  /** Session name when the report was handed in (the worker may have left since). */
+  name: string;
+  project: string;
+  ts: number;
+  text: string;
+  read: boolean;
 }
 
 /**
@@ -64,6 +104,10 @@ export interface SessionState extends WorkerState {
   mailbox: number;
   /** Started by the office in the background (claude -p); follow-ups resume it. */
   headless?: boolean;
+  /** Idle for a long time: sleeping in the Sleeping Quarters until the guard fetches them. */
+  asleep?: boolean;
+  /** The guard is on the way to wake them. */
+  waking?: boolean;
 }
 
 export interface LogEntry {
@@ -80,7 +124,12 @@ export interface LogEntry {
 
 export type ServerMessage =
   /** `token` authorises POST /prompt; only sent to (localhost-only) WebSocket clients. */
-  | { type: 'snapshot'; sessions: SessionState[]; log: LogEntry[]; token?: string }
+  /** `reports` is only sent to WebSocket clients (not the /state debug endpoint). */
+  | { type: 'snapshot'; sessions: SessionState[]; log: LogEntry[]; token?: string; reports?: Report[]; questions?: PendingQuestion[] }
+  /** The questions waiting at the Manager changed (all of them, oldest first). */
+  | { type: 'questions'; questions: PendingQuestion[] }
+  /** A new report arrived, or one changed (marked read). */
+  | { type: 'report'; report: Report }
   | { type: 'session'; session: SessionState }
   | { type: 'remove'; id: string }
   | { type: 'log'; entry: LogEntry }

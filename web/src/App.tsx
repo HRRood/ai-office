@@ -4,6 +4,9 @@ import type { RoomId } from '../../shared/rooms.config';
 import { OfficeCanvas, type OfficeApi } from './components/OfficeCanvas';
 import { LaunchDialog } from './components/LaunchDialog';
 import { PromptDialog } from './components/PromptDialog';
+import { ReportsDialog } from './components/ReportsDialog';
+import { QuestionsDialog } from './components/QuestionsDialog';
+import { ManagerDialog } from './components/ManagerDialog';
 import { SidePanel } from './components/SidePanel';
 import type { CameraState, Pick, Selection } from './engine/renderer';
 import { useOffice } from './useOffice';
@@ -59,7 +62,23 @@ function HolidayBadge({ api }: { api: React.MutableRefObject<OfficeApi | null> }
 const NONE: Selection = { sessionId: null, workerId: null, roomId: null };
 
 export function App() {
-  const { connected, conn, sessions, log } = useOffice();
+  const { connected, conn, sessions, log, reports, questions } = useOffice();
+  /** The Manager's reports inbox is open. */
+  const [readingReports, setReadingReports] = useState(false);
+  const unreadReports = reports.filter((r) => !r.read).length;
+  /** Claude's questions are open at the Manager's desk. */
+  const [answering, setAnswering] = useState(false);
+  // Close the questions dialog once nothing is waiting (answered in the terminal, say).
+  useEffect(() => {
+    if (!questions.length) setAnswering(false);
+  }, [questions.length]);
+  /** The Manager's desk menu is open (optionally straight on waking someone). */
+  const [desk, setDesk] = useState<{ wakeId: string | null } | null>(null);
+  const closeDesk = () => {
+    setReadingReports(false);
+    setAnswering(false);
+    setDesk(null);
+  };
   const [selection, setSelection] = useState<Selection>(NONE);
   const [camera, setCamera] = useState<CameraState>({ zoom: 1, following: null });
   const api = useRef<OfficeApi | null>(null);
@@ -100,13 +119,14 @@ export function App() {
       if (e.key !== 'Escape') return;
       setTalkTo(null);
       setLaunching(false);
+      closeDesk();
       clear();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [clear]);
 
-  const waiting = sessions.filter((s) => s.status === 'waiting').length;
+  const waiting = Math.max(sessions.filter((s) => s.status === 'waiting').length, questions.length);
   useEffect(() => {
     document.title = waiting ? `(${waiting}!) Claude Office` : 'Claude Office';
   }, [waiting]);
@@ -129,6 +149,32 @@ export function App() {
           {conn === 'live' ? 'live' : conn === 'offline' ? 'server offline — is npm run dev running?' : 'connecting…'}
         </span>
         <span className="spacer" />
+        {questions.length > 0 && (
+          <button
+            className="reports-btn question"
+            title="Claude is waiting for your answer"
+            onClick={() => {
+              setTalkTo(null);
+              setLaunching(false);
+              setReadingReports(false);
+              setAnswering((v) => !v);
+            }}
+          >
+            ❓ Questions ({questions.length})
+          </button>
+        )}
+        <button
+          className={`reports-btn ${unreadReports ? 'unread' : ''}`}
+          title="Reports workers handed to the Manager"
+          onClick={() => {
+            setTalkTo(null);
+            setLaunching(false);
+            setAnswering(false);
+            setReadingReports((v) => !v);
+          }}
+        >
+          📄 Reports{unreadReports ? ` (${unreadReports})` : ''}
+        </button>
         <HolidayBadge api={api} />
         <ShiftClock />
       </header>
@@ -142,18 +188,84 @@ export function App() {
           onCamera={setCamera}
           workerName={(id) => names.get(id)}
           nicknames={nicknames}
+          unreadReports={unreadReports}
+          openQuestions={questions.length}
           onManager={() => {
             setTalkTo(null);
-            setLaunching(true);
+            // Questions waiting on you go first. With reports or sleepers around he opens his desk;
+            // otherwise he takes a new assignment.
+            if (questions.length) setAnswering(true);
+            else if (reports.length || sessions.some((s) => s.asleep)) setDesk({ wakeId: null });
+            else setLaunching(true);
           }}
           onTalk={(id) => {
             setLaunching(false);
+            closeDesk();
             setTalkTo(id);
             selectPerson(id);
           }}
         />
+        {desk && !launching && !answering && !readingReports && (
+          <ManagerDialog
+            managerName={nicknames['npc:boss'] ?? 'The Manager'}
+            sessions={sessions}
+            nicknames={nicknames}
+            unreadReports={unreadReports}
+            totalReports={reports.length}
+            questions={questions.length}
+            wakeId={desk.wakeId}
+            onQuestions={() => {
+              setDesk(null);
+              setAnswering(true);
+            }}
+            onReports={() => {
+              setDesk(null);
+              setReadingReports(true);
+            }}
+            onLaunch={() => {
+              setDesk(null);
+              setLaunching(true);
+            }}
+            onClose={() => setDesk(null)}
+          />
+        )}
+        {answering && !launching && (
+          <QuestionsDialog
+            managerName={nicknames['npc:boss'] ?? 'The Manager'}
+            questions={questions}
+            sessions={sessions}
+            nicknames={nicknames}
+            onClose={() => setAnswering(false)}
+          />
+        )}
+        {readingReports && !launching && !answering && (
+          <ReportsDialog
+            managerName={nicknames['npc:boss'] ?? 'The Manager'}
+            reports={reports}
+            sessions={sessions}
+            nicknames={nicknames}
+            onLaunch={() => {
+              setReadingReports(false);
+              setLaunching(true);
+            }}
+            onClose={() => setReadingReports(false)}
+          />
+        )}
         {launching && <LaunchDialog managerName={nicknames['npc:boss'] ?? 'The Manager'} onClose={() => setLaunching(false)} />}
-        {talkTo && <PromptDialog workerId={talkTo} sessions={sessions} nicknames={nicknames} onClose={() => setTalkTo(null)} />}
+        {talkTo && (
+          <PromptDialog
+            workerId={talkTo}
+            sessions={sessions}
+            nicknames={nicknames}
+            onClose={() => setTalkTo(null)}
+            onWake={(id) => {
+              setTalkTo(null);
+              closeDesk();
+              setLaunching(false);
+              setDesk({ wakeId: id });
+            }}
+          />
+        )}
         <SidePanel
           sessions={sessions}
           log={log}

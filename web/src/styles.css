@@ -821,3 +821,291 @@ main {
   align-items: center;
   flex-wrap: wrap;
 }
+
+/* ---------- Manager's reports ---------- */
+.reports-btn {
+  all: unset;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.reports-btn.unread {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.reports-btn:hover {
+  border-color: var(--accent);
+}
+.reports-btn:focus-visible {
+  outline: 2px solid var(--accent);
+}
+.talk.reports {
+  width: min(620px, calc(100% - 32px - 340px));
+  max-height: calc(100% - 80px);
+  display: flex;
+  flex-direction: column;
+}
+.report-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  min-height: 0;
+}
+.report-list button {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 10px minmax(0, 9em) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.report-list button:hover,
+.report-list button:focus-visible {
+  background: var(--panel-2);
+  outline: none;
+}
+.report-list button.unread {
+  color: var(--text);
+}
+.report-list button.unread .report-who::after {
+  content: ' •';
+  color: var(--accent);
+}
+.report-list .swatch,
+.report-meta .swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  display: inline-block;
+}
+.report-who {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.report-snippet {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.report-when {
+  font-size: 11px;
+  white-space: nowrap;
+}
+.report-view {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.report-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.report-meta .of {
+  color: var(--muted);
+}
+.report-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
+  min-height: 0;
+  max-height: 55vh;
+  font-size: 13px;
+  line-height: 1.5;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.report-view textarea {
+  margin-top: 4px;
+}
+
+/* ---------- the Manager's desk: menu and waking sleepers ---------- */
+.talk.manager {
+  width: min(520px, calc(100% - 32px - 340px));
+  max-height: calc(100% - 80px);
+  display: flex;
+  flex-direction: column;
+}
+.manager-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.manager-item {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.manager-item:hover:not(:disabled),
+.manager-item:focus-visible {
+  border-color: var(--accent);
+}
+.manager-item:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.manager-item.urgent {
+  border-color: #f0c040;
+}
+.manager-item .count {
+  color: var(--muted);
+  font-size: 12px;
+}
+.manager-section {
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.sleeper-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.sleeper-list li {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 10em) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 2px;
+  font-size: 13px;
+}
+.sleeper-list .swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+.sleeper-list .of {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sleeper-list button {
+  all: unset;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+.sleeper-list button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.wake-form {
+  margin-top: 8px;
+}
+
+/* ---------- Claude's questions at the Manager ---------- */
+.reports-btn.question {
+  color: var(--text);
+  border-color: #f0c040;
+}
+.talk.questions {
+  width: min(620px, calc(100% - 32px - 340px));
+  max-height: calc(100% - 80px);
+  display: flex;
+  flex-direction: column;
+  border-color: #f0c040;
+}
+.talk.questions .talk-head .swatch {
+  width: 10px;
+  border-radius: 3px;
+}
+.question-list {
+  overflow-y: auto;
+  min-height: 0;
+  margin-top: 10px;
+}
+.question {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 0 0 10px;
+  padding: 8px 10px 10px;
+}
+.question legend {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 0 4px;
+}
+.question-chip {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 0 6px;
+  margin-right: 6px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+.question-option {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 5px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.question-option:hover,
+.question-option.on {
+  background: var(--panel-2);
+}
+.question-option input {
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+.question-label {
+  display: block;
+}
+.question-desc {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+.question-other {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.question-other:focus {
+  outline: none;
+  border-color: var(--accent);
+}

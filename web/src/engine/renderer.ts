@@ -1,7 +1,7 @@
 // Canvas renderer: owns worker entities, moves them along A* paths, runs the camera,
 // and draws the office in 3/4 perspective.
-import { ENTRANCE_ROOM, type RoomId } from '../../../shared/rooms.config';
-import type { SessionState, WorkerStatus } from '../../../shared/types';
+import { ENTRANCE_ROOM, SLEEP_ROOM, type RoomId } from '../../../shared/rooms.config';
+import { REPORT_ACTION, type SessionState, type WorkerStatus } from '../../../shared/types';
 import { displayName, shorten } from '../../../shared/names';
 import { hash, loadMap, type OfficeMap, type Tile } from './map';
 import { HOLIDAY_INFO, HolidayDecor, currentDate, currentHoliday, giftsUnderTree, santaHat, type DecorView, type Holiday } from './holidays';
@@ -55,13 +55,23 @@ const BOSS_IDLE = [
   'Excuses are not deliverables.',
   'Silence. I am reviewing the metrics.',
 ];
+const BOSS_RECEIVE = [
+  (n: string) => `Your report is noted, ${n}.`,
+  (n: string) => `${n}. I will review this personally.`,
+  (n: string) => `Finally. Leave it on the desk, ${n}.`,
+  (n: string) => `Adequate work, ${n}. Dismissed.`,
+];
 const BOSS_SPEAK_MS = 3000; // lights stay dimmed this long after he speaks
+/** The guard: keeps watch over the Sleeping Quarters and fetches sleepers when the Manager asks. */
+const GUARD_ID = 'npc:guard';
+const GUARD_IDLE = ['All quiet.', 'Lights out means lights out.', 'Nobody sleeps on my watch… except them.', 'Shh. They’re resting.'];
 /** You: walk around with the arrow keys / WASD and press E to talk to someone. */
 export const PLAYER_ID = 'npc:you';
 /** Default names of the non-session characters (for the rename card). */
 export const NPC_INFO: Record<string, { name: string; role: string }> = {
   'npc:you': { name: 'You', role: 'That\'s you. Walk with the arrow keys / WASD, press E to talk.' },
-  'npc:boss': { name: 'The Manager', role: 'Runs the Manager\'s Office and hands out new tasks.' },
+  'npc:boss': { name: 'The Manager', role: 'Runs the Manager\'s Office, hands out new tasks and collects the reports. Press E next to him to read them, or to wake a sleeper.' },
+  'npc:guard': { name: 'The Guard', role: 'Watches the Sleeping Quarters and fetches sleepers when the Manager sends him.' },
   'npc:sint': { name: 'Sinterklaas', role: 'Holiday visitor (15 Nov – 5 Dec).' },
   'npc:piet:0': { name: 'Piet', role: 'Holiday visitor (15 Nov – 5 Dec).' },
   'npc:piet:1': { name: 'Piet', role: 'Holiday visitor (15 Nov – 5 Dec).' },
@@ -99,6 +109,8 @@ export interface Worker {
   moving?: boolean;
   /** Prompts from you waiting in this session's mailbox. */
   mail?: number;
+  /** Asleep, and the guard is on the way to wake them. */
+  waking?: boolean;
   /** The name before any nickname you gave them. */
   baseName?: string;
 }
@@ -184,8 +196,12 @@ export class OfficeRenderer {
   onCameraChange?: (c: CameraState) => void;
   /** Called when you press E next to a session's worker (helpers included): open the prompt dialog. */
   onTalk?: (workerId: string) => void;
-  /** Called when you press E next to the Manager: open the "start a new session" dialog. */
+  /** Called when you press E next to the Manager: open his desk (reports, new sessions). */
   onManager?: () => void;
+  /** Reports on the Manager's desk you haven't read yet (shown on his name tag). */
+  private unreadReports = 0;
+  /** Claude's questions waiting at the Manager's desk (shown on his name tag). */
+  private openQuestions = 0;
   /** Called when you walk out through the airlock (true) or come back in (false). */
   onPlayerAway?: (away: boolean) => void;
   /** You left the office through the airlock; remembered per browser. */
@@ -207,6 +223,7 @@ export class OfficeRenderer {
     [this.tcx, this.tcy] = [this.cx, this.cy];
     this.evening = this.isEvening();
     this.bossSeat = this.findBossSeat();
+    this.guardPost = this.findGuardPost();
     this.decor = new HolidayDecor(this.map, this.bossTiles());
     this.applyHoliday();
   }
@@ -242,6 +259,7 @@ export class OfficeRenderer {
 
   /** Where a worker should be shown: after hours, anyone not working goes to the cantina. */
   private displayRoom(room: RoomId, status: WorkerStatus): RoomId {
+    if (room === SLEEP_ROOM) return room; // sleepers don't go partying
     return this.evening && (status === 'resting' || status === 'idle') ? CANTINA : room;
   }
 
@@ -435,8 +453,16 @@ export class OfficeRenderer {
     const now = performance.now();
     this.poke(target.id); // they hop and turn to you
     if (target.id === BOSS_ID) {
-      me.action = 'I have a new assignment.';
-      target.action = 'Name the project. I will assign the work.';
+      if (this.openQuestions) {
+        me.action = 'Someone has a question?';
+        target.action = this.openQuestions > 1 ? `${this.openQuestions} questions. Answer them.` : 'One question. Answer it.';
+      } else if (this.unreadReports) {
+        me.action = 'Any reports for me?';
+        target.action = `${this.unreadReports} on my desk. Read them.`;
+      } else {
+        me.action = 'I have a new assignment.';
+        target.action = 'Name the project. I will assign the work.';
+      }
       this.onManager?.();
     } else if (target.id === SINT_ID) {
       me.action = 'Dag Sinterklaas!';
@@ -445,6 +471,9 @@ export class OfficeRenderer {
       me.action = 'Hoi Piet!';
       target.action = 'Hier, een pepernoot voor jou! 🍪';
       this.throwPepernoten(target, now);
+    } else if (target.id === GUARD_ID) {
+      me.action = 'Evening, officer.';
+      target.action = this.guardTarget ? 'Busy. Manager’s orders.' : 'Need someone woken? Ask the Manager.';
     } else {
       me.action = `Hey ${target.name}, I have a task for you.`;
       me.actionAt = now;
@@ -607,6 +636,7 @@ export class OfficeRenderer {
       live.add(s.id);
       const main = this.upsert(s.id, s.id, false, shorten(displayName(s), 22), look, this.displayRoom(s.room, s.status), s.status, s.action, now);
       main.mail = s.mailbox ?? 0;
+      main.waking = !!s.waking;
       for (const a of s.subagents) {
         const id = `${s.id}:${a.id}`;
         live.add(id);
@@ -651,7 +681,11 @@ export class OfficeRenderer {
       w.room = room;
       w.spot = this.claimSpot(id, room);
       this.walkTo(w, w.spot);
-      if (room === BOSS_ROOM && !isSub) this.bossAssigns(name);
+      if (room === BOSS_ROOM && !isSub) {
+        if (action === REPORT_ACTION) this.bossReceives(name);
+        else if (status === 'waiting') this.bossSays(`${name} has a question for you. Come to my desk.`);
+        else this.bossAssigns(name);
+      }
     }
     if (w.action !== action || w.status !== status) w.actionAt = now;
     Object.assign(w, { look, status, action });
@@ -761,6 +795,7 @@ export class OfficeRenderer {
     }
     this.tickSint(now);
     this.tickBoss(now);
+    this.tickGuard(now);
     if (this.synced && !this.playerAway && !this.workers.has(PLAYER_ID)) this.spawnPlayer(now);
     this.updatePlayer(dt);
   }
@@ -774,6 +809,73 @@ export class OfficeRenderer {
       for (let y = y0 + 1; y < y1; y++)
         if (this.map.at(x, y) === '.' && this.map.at(x, y + 1) === 'R' && !nearDoor(x, y)) return [x, y];
     return null;
+  }
+
+  /** The guard's post: the Sleeping Quarters floor tile closest to its door (but not in the doorway). */
+  private findGuardPost(): Tile | null {
+    const room = this.map.rooms[SLEEP_ROOM];
+    if (!room) return null;
+    const [x0, y0, x1, y1] = room.rect;
+    const doors: Tile[] = [];
+    for (let y = y0; y <= y1; y++)
+      for (let x = x0; x <= x1; x++) if (this.map.at(x, y) === 'D') doors.push([x, y]);
+    const near = (x: number, y: number) => doors.some(([dx, dy]) => Math.abs(dx - x) <= 1 && Math.abs(dy - y) <= 1);
+    let best: Tile | null = null;
+    let bestD = Infinity;
+    for (let y = y0 + 1; y < y1; y++)
+      for (let x = x0 + 1; x < x1; x++) {
+        if (this.map.at(x, y) !== '.' || near(x, y)) continue;
+        const d = Math.min(...doors.map(([dx, dy]) => Math.abs(dx - x) + Math.abs(dy - y)), 99);
+        if (d < bestD) [best, bestD] = [[x, y], d];
+      }
+    return best;
+  }
+
+  /** The guard stands watch; when someone is being woken he walks over, shakes them awake, and goes back. */
+  private tickGuard(now: number) {
+    if (!this.guardPost || !this.synced) return;
+    const post = this.guardPost;
+    let guard = this.workers.get(GUARD_ID);
+    if (!guard) {
+      const [x, y] = post;
+      guard = {
+        id: GUARD_ID, sessionId: GUARD_ID, isSub: false, name: 'The Guard',
+        look: { archetype: 'pilot', color: '#8a2a2a', skin: '#c68642' },
+        room: SLEEP_ROOM, spot: [x, y], x, y, path: [], dir: 'down', walked: 0,
+        status: 'resting', action: 'All quiet.', actionAt: now, leaving: false,
+      };
+      this.occupied.set(`${x},${y}`, GUARD_ID); // nobody sleeps on his post
+      this.workers.set(GUARD_ID, guard);
+      this.applyName(guard);
+    }
+    const target = [...this.workers.values()].find((w) => w.waking && !w.leaving);
+    if (target && this.guardTarget !== target.id) {
+      // Off to fetch them: stand on a free floor tile next to where they sleep.
+      this.guardTarget = target.id;
+      this.guardArrived = false;
+      const [tx, ty] = target.spot;
+      const next = ([[0, 1], [-1, 0], [1, 0], [0, -1]] as const)
+        .map(([dx, dy]): Tile => [tx + dx, ty + dy])
+        .find(([x, y]) => this.map.isWalkable(x, y) && !this.occupied.has(`${x},${y}`));
+      this.walkTo(guard, next ?? post);
+      guard.action = `On my way, ${target.name}.`;
+      guard.actionAt = now;
+    } else if (target && !this.guardArrived && !guard.path.length) {
+      this.guardArrived = true;
+      guard.action = `Up, ${target.name}! The Manager wants you.`;
+      guard.actionAt = now;
+      guard.dir = target.x < guard.x ? 'left' : target.x > guard.x ? 'right' : target.y < guard.y ? 'up' : 'down';
+      this.poke(target.id); // they jolt awake
+    } else if (!target && this.guardTarget) {
+      this.guardTarget = null;
+      this.guardArrived = false;
+      this.walkTo(guard, post);
+      guard.action = 'Back to my post.';
+      guard.actionAt = now;
+    } else if (!target && !guard.path.length && now - guard.actionAt > 30000) {
+      guard.action = GUARD_IDLE[Math.floor(Math.random() * GUARD_IDLE.length)];
+      guard.actionAt = now;
+    }
   }
 
   private bossTiles(): Tile[] {
@@ -809,11 +911,30 @@ export class OfficeRenderer {
     }
   }
 
+  /** How many reports you haven't read yet; shown as 📄 on the Manager's name tag. */
+  setUnreadReports(n: number) {
+    this.unreadReports = n;
+  }
+
+  /** How many of Claude's questions wait at the Manager's desk; shown as ❓ on his name tag. */
+  setOpenQuestions(n: number) {
+    this.openQuestions = n;
+  }
+
   /** Someone just came to the manager's office for a new task. */
   private bossAssigns(name: string) {
+    this.bossSays(BOSS_ASSIGN[Math.floor(Math.random() * BOSS_ASSIGN.length)](name));
+  }
+
+  /** Someone walked their finished turn's report over. */
+  private bossReceives(name: string) {
+    this.bossSays(BOSS_RECEIVE[Math.floor(Math.random() * BOSS_RECEIVE.length)](name));
+  }
+
+  private bossSays(line: string) {
     const boss = this.workers.get(BOSS_ID);
     if (!boss) return;
-    boss.action = BOSS_ASSIGN[Math.floor(Math.random() * BOSS_ASSIGN.length)](name);
+    boss.action = line;
     boss.actionAt = performance.now();
     this.bossNextLine = boss.actionAt + 15000;
     if (this.bossDir !== 'down') this.bossSwayUntil = boss.actionAt + 700;
@@ -868,6 +989,11 @@ export class OfficeRenderer {
   private visitorsOn = readFlag(VISITORS_KEY, true);
   /** Where the manager sits (behind the desk) and when he next says something. */
   private bossSeat: Tile | null = null;
+  /** Where the guard stands in the Sleeping Quarters when nobody needs waking. */
+  private guardPost: Tile | null = null;
+  /** Worker the guard is fetching. */
+  private guardTarget: string | null = null;
+  private guardArrived = false;
   private bossNextLine = 0;
   /** He looks around the room now and then; the cape sways while he turns. */
   private bossDir: Dir = 'down';
@@ -1379,7 +1505,10 @@ export class OfficeRenderer {
       const tfs = this.textSize(w.isSub ? 3.4 : 4.2, w.isSub ? 9 : 10, w.isSub ? 12 : 14);
       ctx.font = this.font(tfs);
       const party = this.partying(w);
-      const mail = w.mail ? ` 📨${w.mail}` : '';
+      const mail =
+        (w.mail ? ` 📨${w.mail}` : '') +
+        (w.id === BOSS_ID && this.openQuestions ? ` ❓${this.openQuestions}` : '') +
+        (w.id === BOSS_ID && this.unreadReports ? ` 📄${this.unreadReports}` : '');
       const tagText = (w.status === 'idle' && !party ? `${w.name} · zZ` : w.name) + mail;
       const tag = { text: tagText, fs: tfs, w: ctx.measureText(tagText).width + tfs * 0.8, h: tfs * 1.4 };
 

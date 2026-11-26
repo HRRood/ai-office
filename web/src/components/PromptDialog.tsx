@@ -11,10 +11,12 @@ interface Props {
   sessions: SessionState[];
   nicknames: Record<string, string>;
   onClose: () => void;
+  /** They're asleep: ask the Manager to send the guard. */
+  onWake: (sessionId: string) => void;
 }
 
 /** Talk to a worker: type a prompt and it goes into that Claude Code session's mailbox. */
-export function PromptDialog({ workerId, sessions, nicknames, onClose }: Props) {
+export function PromptDialog({ workerId, sessions, nicknames, onClose, onWake }: Props) {
   const [sessionId, agentId] = workerId.split(':');
   const session = sessions.find((s) => s.id === sessionId);
   const helper = agentId ? session?.subagents.find((a) => a.id === agentId) : undefined;
@@ -36,6 +38,21 @@ export function PromptDialog({ workerId, sessions, nicknames, onClose }: Props) 
   }
 
   const name = shorten(nicknames[session.id] ?? displayName(session), 40);
+  if (session.asleep) {
+    return (
+      <div className="talk" role="dialog" aria-label={`${name} is asleep`}>
+        <p className="talk-note">
+          💤 {name} is fast asleep. Shouting won't help: ask the Manager to send the guard to wake them.
+        </p>
+        <div className="talk-actions">
+          <button onClick={onClose}>Cancel</button>
+          <button className="primary" onClick={() => onWake(session.id)} disabled={session.waking}>
+            {session.waking ? 'Guard on the way…' : 'Ask the Manager'}
+          </button>
+        </div>
+      </div>
+    );
+  }
   const busy = session.status === 'working' || session.status === 'waiting';
   const when = session.headless
     ? busy

@@ -65,6 +65,55 @@ npm run dev
 | `npm run typecheck` | TypeScript, server + web |
 | `npm run build` | production build of the frontend into `dist/` |
 
+## Reports
+
+When a session finishes a turn, its worker walks Claude's final message over to the Manager's Office
+and hands it in before their coffee break. The Manager's name tag shows 📄 with the number of unread
+reports. Press **E** next to him (or click **📄 Reports** in the header) to read them. The server keeps
+the last 50 reports in memory only: they're gone when it restarts, and they aren't included in the
+`/state` debug endpoint.
+
+You can also **reply** from an open report: your reply goes to that session's mailbox, like talking
+to the worker. Handy when Claude ended its turn with a question.
+
+## Sleeping and waking
+
+Sessions that go quiet for 15 minutes don't leave any more: they go to bed in the **Sleeping
+Quarters** (right of the Open Office), watched over by **the Guard**. To get one back, press **E**
+next to the Manager, pick them under 💤 Sleeping Quarters, optionally type what they should do, and
+**Send the guard**. The guard walks over, shakes them awake, and they come back to work with your
+prompt (empty: they tell you where they left off). Talking to a sleeper directly sends you to the
+Manager too.
+
+How they're woken depends on the session:
+
+- **Terminal session whose mailbox hook is still listening** (up to 55 min after its last turn): the
+  prompt goes straight into that terminal session.
+- **Background session the Manager started:** it's resumed with your prompt, like any follow-up.
+- **Terminal session that stopped listening:** it's resumed in the background with
+  `claude -p --resume`, using `permissionMode` / `allowedTools` from `office.projects.json`. This only
+  works when its folder is listed there (the same rule as starting sessions); otherwise wake it in its
+  terminal. It continues as a background session from then on. If its terminal is still open, the
+  terminal won't show what happened in the background.
+
+Sleepers go home after a day without activity. Typing in a sleeper's terminal wakes it on its own.
+`OFFICE_SLEEP_AFTER_S` changes how long it takes to fall asleep.
+
+## Answering Claude's questions at the Manager
+
+When Claude asks you something with its question dialog (`AskUserQuestion`), the worker walks to the
+Manager's Office, the Manager's name tag shows ❓, and a **❓ Questions** button appears in the header.
+Press **E** next to the Manager (or click the button), pick the options or type your own answer, and
+**Send answer**. Claude continues with your answers as if you'd picked them in the terminal.
+
+- This only happens while the office page is open. Otherwise the question appears in the terminal as
+  usual.
+- While a question waits at the Manager, the terminal doesn't show it. Click **Answer in terminal**
+  to hand it back; after 10 minutes without an answer it goes back to the terminal by itself
+  (`OFFICE_QUESTION_WAIT_S` changes that).
+- It's a separate hook (`hooks/office-question.js`, `PreToolUse` for `AskUserQuestion`). Run
+  `npm run install-hooks` again to add it, and set `OFFICE_QUESTIONS=0` to turn it off.
+
 ## Starting new sessions from the Manager
 
 Walk up to the Manager (you can talk to him across his desk), press **E**, pick a project, and type
@@ -165,9 +214,13 @@ Only metadata leaves the hook, and only to `127.0.0.1`:
 - the first **40 characters** of Bash commands, with obvious secrets masked
   (`API_KEY=***`, `Bearer ***`)
 - subagent id/type, notification type, session start/end reason, timestamp
+- the full **working directory** on `SessionStart`, `UserPromptSubmit` and `Stop`, so the guard can
+  wake a sleeping session there (it stays on the server and isn't shown in the page)
+- on `Stop` only: Claude's **final message of the turn**, as a report for the Manager's inbox (see
+  [Reports](#reports)). Set `OFFICE_REPORTS=0` in your environment to turn this off.
 
-It never sends prompt text, file contents, tool output, assistant messages, notification text or
-web search queries/URLs.
+Other than that final message, it never sends prompt text, file contents, tool output, assistant
+messages, notification text or web search queries/URLs.
 
 The server binds to `127.0.0.1` only. It rejects requests whose `Host` isn't localhost (stops
 DNS-rebinding), only accepts `application/json` posts (stops cross-site form posts), and only allows
@@ -205,9 +258,10 @@ jump. All characters are original designs.
   (40 in the panel, full title on hover). Until a session has a title, its project folder is used.
   The shortening is `shorten()` in `shared/names.ts`.
 - **Statuses:** working, waiting (needs you), resting (turn finished), idle (no events for 2 min,
-  shown faded with "zZ"). Sessions are removed on `SessionEnd`, or after 15 min without events
-  (background sessions started by the Manager wait up to 60 min for your next prompt). A pending
-  permission prompt stays "waiting" however long it takes.
+  shown faded with "zZ"). After 15 min without events a session goes to bed in the **Sleeping
+  Quarters** (background sessions started by the Manager stay up 60 min); see
+  [Sleeping and waking](#sleeping-and-waking). Sessions leave on `SessionEnd`, or after sleeping for
+  a day. A pending permission prompt or question keeps them "waiting" however long it takes.
 - **Side panel:** a "needs you" alert, the crew list, details for the selected session (recent
   actions, helpers), and a live log of the last 50 events. The tab title shows `(n!)` while
   someone is waiting on you.
@@ -301,6 +355,7 @@ The server restarts by itself under `npm run dev`. Reload the page after that.
 | `#` | wall | `A` | comm dish |
 | `D` | door (walkable) | `R` | manager's desk (the Manager sits behind the right end) |
 | `E` | entrance airlock | `P` | plant |
+| `X` | secret door (walkable, looks like a wall panel) | `b` | bunk bed (two tiles wide) |
 | `V` | viewport (starfield) | `s` | sofa |
 | `B` | data-cartridge rack | `W` | whiteboard |
 | `d` | console desk (seats in front of it) | `K` | coffee machine |

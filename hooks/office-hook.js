@@ -12,9 +12,13 @@
  *   - gives up after 500 ms no matter what
  *   - no dependencies, plain Node
  *
- * Privacy: only metadata leaves this script. No prompt text, file contents,
- * tool output, assistant messages, or full commands. The session title (Claude Code's
- * short name for the session, as shown in /resume) is sent so workers can be named after it.
+ * Privacy: only metadata leaves this script, plus one exception. No prompt text, file contents,
+ * tool output, or full commands. The session title (Claude Code's short name for the session,
+ * as shown in /resume) is sent so workers can be named after it.
+ * Exception: on Stop, Claude's final message of the turn is sent as a report for the Manager's
+ * inbox. It only goes to the local office server (127.0.0.1), which keeps it in memory.
+ * Set OFFICE_REPORTS=0 to turn this off.
+ * The full working directory is sent on a few events so the office can wake a sleeping session.
  */
 'use strict';
 
@@ -27,6 +31,50 @@ const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
 const MAX_STDIN = 20 * 1024 * 1024; // Write/Edit payloads can be large; we only peek at metadata
 const CMD_CHARS = 40;
+const REPORT_CHARS = 20000;
+const TRANSCRIPT_TAIL = 2 * 1024 * 1024; // only read the end of the transcript
+
+/** Text of an assistant message's content (string or content blocks). */
+function textOf(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text)
+    .join('\n');
+}
+
+/** Claude's final message of the turn: from the hook input, else the end of the transcript. */
+function finalMessage(h) {
+  if (typeof h.last_assistant_message === 'string' && h.last_assistant_message.trim()) {
+    return h.last_assistant_message;
+  }
+  if (typeof h.transcript_path !== 'string') return undefined;
+  const fs = require('fs');
+  const fd = fs.openSync(h.transcript_path, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    const len = Math.min(size, TRANSCRIPT_TAIL);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    const lines = buf.toString('utf8').split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      let entry;
+      try {
+        entry = JSON.parse(lines[i]);
+      } catch {
+        continue; // blank, or cut off at the start of the tail
+      }
+      if (entry.type === 'user' && !entry.isMeta && typeof entry.message?.content === 'string') break; // the prompt: no reply after it
+      if (entry.type !== 'assistant' || entry.isSidechain) continue;
+      const text = textOf(entry.message?.content).trim();
+      if (text) return text;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return undefined;
+}
 
 function str(v, max = 200) {
   return typeof v === 'string' && v.length > 0 ? v.slice(0, max) : undefined;
@@ -58,6 +106,9 @@ function build(h, path) {
     notification_type: str(h.notification_type, 60),
     error: str(h.error, 40), // StopFailure: error type enum (PostToolUseFailure's error text is cut short too)
     title: str(h.session_title, 120), // SessionStart / UserPromptSubmit, when the session has one
+    // Full working directory, only on SessionStart / UserPromptSubmit / Stop: the local server uses it
+    // to wake a sleeping session (claude --resume) in a folder listed in office.projects.json.
+    cwd: ['SessionStart', 'UserPromptSubmit', 'Stop'].includes(h.hook_event_name) ? str(h.cwd, 4096) : undefined,
   };
 
   if (tool && FILE_TOOLS.has(tool)) {
@@ -69,6 +120,14 @@ function build(h, path) {
   }
   if ((tool === 'Agent' || tool === 'Task') && typeof input.subagent_type === 'string') {
     ev.subagent_type = input.subagent_type.slice(0, 80);
+  }
+  if (h.hook_event_name === 'Stop' && !h.agent_id && process.env.OFFICE_REPORTS !== '0') {
+    try {
+      const text = finalMessage(h);
+      if (text) ev.report = text.slice(0, REPORT_CHARS);
+    } catch {
+      // no report this time; the event itself still goes out
+    }
   }
   if (h.hook_event_name === 'PostToolUseFailure') {
     ev.error = undefined; // free-form error text may echo file/command content

@@ -118,6 +118,40 @@ export class Launcher {
     return null;
   }
 
+  /**
+   * Can a session in `cwd` be resumed in the background? Only inside folders listed in
+   * office.projects.json (the same rule as starting sessions). Returns the project, or an error.
+   */
+  resumable(cwd: string | undefined): { project?: string; error?: string } {
+    if (!cwd) return { error: "the office doesn't know their folder yet (they need one more prompt first)" };
+    const { cfg, error } = this.config();
+    if (!cfg) return { error: error ?? 'no config' };
+    const dir = path.resolve(cwd);
+    const p = cfg.projects.find((x) => {
+      const root = path.resolve(x.path);
+      return dir === root || dir.startsWith(root + path.sep);
+    });
+    if (!p) return { error: `${path.basename(dir)} isn't in office.projects.json, so the guard can't fetch them. Wake them in their terminal` };
+    if (this.runs.size >= cfg.maxConcurrent) return { error: `already ${this.runs.size} background runs (max ${cfg.maxConcurrent})` };
+    return { project: p.name };
+  }
+
+  /** Wake a sleeping (interactive) session by resuming it in the background with your prompt. */
+  wake(sessionId: string, cwd: string, prompt: string): string | null {
+    const { project, error } = this.resumable(cwd);
+    if (!project) return error ?? 'cannot resume';
+    const { cfg } = this.config();
+    if (!cfg) return 'no config';
+    try {
+      if (!fs.statSync(cwd).isDirectory()) return `${cwd} is not a folder`;
+    } catch {
+      return `${cwd} does not exist`;
+    }
+    this.start(cfg, cwd, project, prompt, sessionId);
+    this.office.markHeadless(sessionId); // from now on follow-ups resume it too
+    return null;
+  }
+
   /** If a background session is free and has mail, continue it with the next prompt. */
   private pump(sessionId: string) {
     const info = this.headless.get(sessionId);

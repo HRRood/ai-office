@@ -29,11 +29,15 @@ interface Props {
   nicknames: Record<string, string>;
   /** You pressed E next to the Manager. */
   onManager: () => void;
+  /** Reports on the Manager's desk you haven't read. */
+  unreadReports: number;
+  /** Claude's questions waiting at the Manager's desk. */
+  openQuestions: number;
 }
 
 const DRAG_THRESHOLD = 5; // px before a press becomes a pan
 
-export function OfficeCanvas({ sessions, ready, selection, onPick, apiRef, onCamera, workerName, onTalk, nicknames, onManager }: Props) {
+export function OfficeCanvas({ sessions, ready, selection, onPick, apiRef, onCamera, workerName, onTalk, nicknames, onManager, unreadReports, openQuestions }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<OfficeRenderer | null>(null);
@@ -205,6 +209,14 @@ export function OfficeCanvas({ sessions, ready, selection, onPick, apiRef, onCam
   useEffect(() => {
     if (ready) rendererRef.current?.setSessions(sessions);
   }, [sessions, ready]);
+
+  useEffect(() => {
+    rendererRef.current?.setUnreadReports(unreadReports);
+  }, [unreadReports]);
+
+  useEffect(() => {
+    rendererRef.current?.setOpenQuestions(openQuestions);
+  }, [openQuestions]);
 
   useEffect(() => {
     rendererRef.current?.setSelection(selection);

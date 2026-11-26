@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { LogEntry, ServerMessage, SessionState } from '../../shared/types';
+import type { LogEntry, PendingQuestion, Report, ServerMessage, SessionState } from '../../shared/types';
 
 const PORT = Number(import.meta.env.VITE_OFFICE_PORT) || 4317;
 const WS_URL = `ws://127.0.0.1:${PORT}/ws`;
@@ -26,6 +26,51 @@ export async function sendPrompt(sessionId: string, text: string): Promise<strin
 }
 
 export type ConnState = 'live' | 'connecting' | 'offline';
+
+async function postWithToken(path: string, body: unknown): Promise<string | null> {
+  if (!token) return 'not connected to the office server';
+  try {
+    const res = await fetch(`${API}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-office-token': token },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) return null;
+    const b = (await res.json().catch(() => ({}))) as { error?: string };
+    return b.error ?? `server said ${res.status}`;
+  } catch {
+    return 'could not reach the office server';
+  }
+}
+
+/** Ask the Manager to send the guard to wake a sleeping session (with an optional first prompt). */
+export function wakeSession(sessionId: string, text: string): Promise<string | null> {
+  return postWithToken('/wake', { session_id: sessionId, text });
+}
+
+/** Answer a question Claude asked (question text -> chosen label(s) or your own text). */
+export function answerQuestion(id: string, answers: Record<string, string>): Promise<string | null> {
+  return postWithToken('/question/answer', { id, answers });
+}
+
+/** Hand a question back to the terminal: Claude Code shows its own dialog right away. */
+export function releaseQuestion(id: string): Promise<string | null> {
+  return postWithToken('/question/release', { id });
+}
+
+/** You opened a report: tell the server so the Manager's unread count drops. */
+export async function markReportRead(id: number): Promise<void> {
+  if (!token) return;
+  try {
+    await fetch(`${API}/reports/read`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-office-token': token },
+      body: JSON.stringify({ id }),
+    });
+  } catch {
+    // offline: it stays unread
+  }
+}
 
 /** Send a worker home (and stop it, if it's a background session the office started). */
 export async function dismissSession(sessionId: string): Promise<string | null> {
@@ -84,6 +129,10 @@ export interface OfficeData {
   conn: ConnState;
   sessions: SessionState[];
   log: LogEntry[];
+  /** Reports handed to the Manager, newest first. */
+  reports: Report[];
+  /** Questions from Claude waiting for your answer at the Manager, oldest first. */
+  questions: PendingQuestion[];
 }
 
 const CONNECT_TIMEOUT_MS = 4000; // give up on an attempt that hangs
@@ -93,7 +142,7 @@ const OFFLINE_AFTER = 4; // failed attempts before we say "offline"
 
 /** Live office state from the server, reconnecting with backoff. */
 export function useOffice(): OfficeData {
-  const [data, setData] = useState<OfficeData>({ connected: false, conn: 'connecting', sessions: [], log: [] });
+  const [data, setData] = useState<OfficeData>({ connected: false, conn: 'connecting', sessions: [], log: [], reports: [], questions: [] });
 
   useEffect(() => {
     let ws: WebSocket | undefined;
@@ -191,7 +240,13 @@ function reduce(d: OfficeData, msg: ServerMessage): OfficeData {
   switch (msg.type) {
     case 'snapshot':
       if (msg.token) token = msg.token;
-      return { connected: true, conn: 'live', sessions: msg.sessions, log: msg.log };
+      return { connected: true, conn: 'live', sessions: msg.sessions, log: msg.log, reports: msg.reports ?? d.reports, questions: msg.questions ?? [] };
+    case 'questions':
+      return { ...d, questions: msg.questions };
+    case 'report': {
+      const rest = d.reports.filter((r) => r.id !== msg.report.id);
+      return { ...d, reports: [msg.report, ...rest].sort((a, b) => b.id - a.id).slice(0, 50) };
+    }
     case 'session': {
       const i = d.sessions.findIndex((s) => s.id === msg.session.id);
       const sessions = i < 0 ? [...d.sessions, msg.session] : d.sessions.map((s, j) => (j === i ? msg.session : s));
