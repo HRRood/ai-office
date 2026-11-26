@@ -191,6 +191,27 @@ export class OfficeState {
     return true;
   }
 
+  /** Mark every report read (the Manager's unread count drops to zero). */
+  markAllReportsRead() {
+    let changed = false;
+    for (const r of this.reports)
+      if (!r.read) {
+        r.read = true;
+        changed = true;
+      }
+    if (changed) this.emit({ type: 'reports', reports: this.reports });
+  }
+
+  /** Throw away the reports you have read; unread ones stay. Returns how many were removed. */
+  clearReadReports(): number {
+    const before = this.reports.length;
+    const keep = this.reports.filter((r) => !r.read);
+    this.reports.splice(0, this.reports.length, ...keep);
+    const removed = before - keep.length;
+    if (removed) this.emit({ type: 'reports', reports: this.reports });
+    return removed;
+  }
+
   /** A turn finished with a final message: file it with the Manager and walk it over. */
   private fileReport(s: SessionState, text: string, now: number) {
     const report: Report = {

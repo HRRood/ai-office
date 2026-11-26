@@ -42,7 +42,7 @@ app.post('/event', express.json({ limit: '128kb' }), (req, res) => {
 
 // CORS only for localhost pages (the Vite dev server runs on another port). Anyone else gets no
 // CORS headers, so the browser refuses to send the request.
-app.use(['/prompt', '/launch', '/projects', '/dismiss', '/reports/read', '/question/answer', '/question/release', '/wake'], (req, res, next) => {
+app.use(['/prompt', '/launch', '/projects', '/dismiss', '/reports/read', '/reports/read-all', '/reports/clear', '/question/answer', '/question/release', '/wake'], (req, res, next) => {
   const origin = req.headers.origin;
   if (origin && LOCAL_ORIGIN.test(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
@@ -106,6 +106,17 @@ app.post('/reports/read', express.json({ limit: '4kb' }), (req, res) => {
   if (!tokenOk(req)) return res.status(403).json({ error: 'bad token' });
   if (!office.markReportRead(Number(req.body?.id))) return res.status(404).json({ error: 'unknown report' });
   res.json({ ok: true });
+});
+
+app.post('/reports/read-all', (req, res) => {
+  if (!tokenOk(req)) return res.status(403).json({ error: 'bad token' });
+  office.markAllReportsRead();
+  res.json({ ok: true });
+});
+
+app.post('/reports/clear', (req, res) => {
+  if (!tokenOk(req)) return res.status(403).json({ error: 'bad token' });
+  res.json({ ok: true, removed: office.clearReadReports() });
 });
 
 // ---------- waking: the Manager sends the guard to fetch a sleeping session ----------

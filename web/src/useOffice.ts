@@ -58,6 +58,16 @@ export function releaseQuestion(id: string): Promise<string | null> {
   return postWithToken('/question/release', { id });
 }
 
+/** Mark every report on the Manager's desk read. */
+export function markAllReportsRead(): Promise<string | null> {
+  return postWithToken('/reports/read-all', {});
+}
+
+/** Throw away the reports you have already read (unread ones stay). */
+export function clearReadReports(): Promise<string | null> {
+  return postWithToken('/reports/clear', {});
+}
+
 /** You opened a report: tell the server so the Manager's unread count drops. */
 export async function markReportRead(id: number): Promise<void> {
   if (!token) return;
@@ -247,6 +257,8 @@ function reduce(d: OfficeData, msg: ServerMessage): OfficeData {
       const rest = d.reports.filter((r) => r.id !== msg.report.id);
       return { ...d, reports: [msg.report, ...rest].sort((a, b) => b.id - a.id).slice(0, 50) };
     }
+    case 'reports':
+      return { ...d, reports: msg.reports };
     case 'session': {
       const i = d.sessions.findIndex((s) => s.id === msg.session.id);
       const sessions = i < 0 ? [...d.sessions, msg.session] : d.sessions.map((s, j) => (j === i ? msg.session : s));

@@ -130,6 +130,8 @@ export type ServerMessage =
   | { type: 'questions'; questions: PendingQuestion[] }
   /** A new report arrived, or one changed (marked read). */
   | { type: 'report'; report: Report }
+  /** The whole report list changed at once (all marked read, or read ones cleared). Newest first. */
+  | { type: 'reports'; reports: Report[] }
   | { type: 'session'; session: SessionState }
   | { type: 'remove'; id: string }
   | { type: 'log'; entry: LogEntry }

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { shorten } from '../../../shared/names';
 import type { Report, SessionState } from '../../../shared/types';
 import { SESSION_COLORS } from '../engine/sprites';
-import { markReportRead, sendPrompt } from '../useOffice';
+import { clearReadReports, markAllReportsRead, markReportRead, sendPrompt } from '../useOffice';
 
 interface Props {
   managerName: string;
@@ -27,6 +27,10 @@ export function ReportsDialog({ managerName, reports, sessions, nicknames, onLau
   const [openId, setOpenId] = useState<number | null>(() => reports.find((r) => !r.read)?.id ?? null);
   const open = reports.find((r) => r.id === openId);
   const unread = reports.filter((r) => !r.read).length;
+  const [tidyError, setTidyError] = useState<string | null>(null);
+  const tidy = async (fn: () => Promise<string | null>) => {
+    setTidyError(await fn());
+  };
 
   const [reply, setReply] = useState('');
   const [sendState, setSendState] = useState<{ kind: 'idle' | 'sending' | 'sent' | 'error'; msg?: string }>({ kind: 'idle' });
@@ -147,7 +151,14 @@ export function ReportsDialog({ managerName, reports, sessions, nicknames, onLau
       <div className="talk-actions">
         {sendState.kind === 'error' && <span className="talk-error">{sendState.msg}</span>}
         {sendState.kind === 'sent' && <span className="talk-ok">📨 Sent to {open ? nameOf(open) : 'them'}</span>}
+        {tidyError && <span className="talk-error">{tidyError}</span>}
         {open && <button onClick={() => setOpenId(null)}>← All reports</button>}
+        {!open && unread > 0 && <button onClick={() => void tidy(markAllReportsRead)}>Mark all read</button>}
+        {!open && reports.length > unread && (
+          <button onClick={() => void tidy(clearReadReports)} title="Remove the reports you have read; unread ones stay">
+            Clear read
+          </button>
+        )}
         {!open && <button onClick={onLaunch}>Start a new session…</button>}
         {open && author ? (
           <button className="primary" onClick={() => void sendReply()} disabled={!reply.trim() || sendState.kind === 'sending'}>

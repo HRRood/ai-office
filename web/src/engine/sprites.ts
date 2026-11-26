@@ -10,14 +10,19 @@ import { ISO_ZSCALE, Mesh, isoOf, type P2, type V3 } from './mesh';
 export type Dir = 'down' | 'up' | 'left' | 'right';
 /** 0 = standing, 1/2 = walk cycle, 3/4 = typing (left / right hand on the keyboard). */
 export type Frame = 0 | 1 | 2 | 3 | 4;
-/** What sessions (the agents) look like: every agent is an astromech droid, tinted in its session colour. */
-export const ARCHETYPES = ['astromech'] as const;
 /**
- * Every figure type. The agents use ARCHETYPES; 'boss' is the Manager (a dark armoured lord), 'captain' is
- * you, 'pilot' the guard, and 'sint' / 'piet' (roetveegpiet) the Sinterklaas visitors. 'droid', 'mystic',
- * 'alien' and 'engineer' are the earlier agent looks, kept available.
+ * What sessions look like: Jedi in the style of Ahsoka, Yoda, Obi-Wan and Anakin, each with a lightsaber
+ * glowing in the session colour. The sub-agents working in a session are 'astromech' droids.
  */
-export type Archetype = (typeof ARCHETYPES)[number] | 'pilot' | 'droid' | 'mystic' | 'alien' | 'engineer' | 'sint' | 'piet' | 'boss' | 'captain';
+export const ARCHETYPES = ['ahsoka', 'yoda', 'obiwan', 'anakin'] as const;
+/**
+ * Every figure type. Sessions use ARCHETYPES and their sub-agents 'astromech'; 'boss' is the Manager (a
+ * Darth Vader style lord), 'captain' is you, 'pilot' the guard, and 'sint' / 'piet' (roetveegpiet) the
+ * Sinterklaas visitors. 'droid', 'mystic', 'alien' and 'engineer' are earlier looks, kept available.
+ */
+export type Archetype =
+  | (typeof ARCHETYPES)[number]
+  | 'astromech' | 'pilot' | 'droid' | 'mystic' | 'alien' | 'engineer' | 'sint' | 'piet' | 'boss' | 'captain';
 
 /** Session colors, indexed by SessionState.color (server keeps them distinct). */
 export const SESSION_COLORS = [
@@ -29,6 +34,14 @@ export const SKINS = ['#f1c27d', '#e0ac69', '#c68642', '#8d5524', '#ffdbac'];
 const ALIEN_SKINS = ['#7fd67a', '#6fb7d6', '#b58ad6', '#d6a35f', '#8fd6c0'];
 /** The wanderer's cloak: sand and brown, with a sash in the session color. */
 const CLOAK = '#7a6248';
+
+/** Clothing and skin of the Jedi session figures (robe = the long brown robe's colour, if they wear one). */
+const JEDI_LOOK: Partial<Record<string, { body: string; pants: string; belt: string; tabard: string; skin?: string; robe?: string }>> = {
+  ahsoka: { body: '#8b3a2e', pants: '#4a3a34', belt: '#6a4a30', tabard: '#a8503e', skin: '#e07a3a' },
+  yoda: { body: '#c9b48a', pants: '#8a6a46', belt: '#7a5a3a', tabard: '#b39d74', skin: '#8fae6a', robe: '#8a6a46' },
+  obiwan: { body: '#d8c7a0', pants: '#5a3e26', belt: '#6a4a2c', tabard: '#c4b089', robe: '#6a4a2e' },
+  anakin: { body: '#3b2c24', pants: '#2a201c', belt: '#1a1412', tabard: '#4e3a2e' },
+};
 
 export interface Look {
   archetype: Archetype;
@@ -102,12 +115,14 @@ function buildCharacter(look: Look, dir: Dir, drawFrame: Frame): Mesh {
   const metal = '#b8c0cc';
   const gold = '#e5b83b';
   const boots = '#2a2a33';
-  const body = a === 'droid' ? metal : a === 'mystic' ? CLOAK : a === 'boss' ? '#121217' : color;
-  const pants =
-    a === 'droid' ? sh(metal, -0.35) : a === 'engineer' ? sh(color, -0.35) : a === 'piet' ? '#f2d13d' : a === 'captain' ? '#1d2b4a' : sh(color, -0.45);
-  const skin = a === 'alien' ? ALIEN_SKINS[Math.max(0, SKINS.indexOf(look.skin)) % ALIEN_SKINS.length] : a === 'droid' ? metal : look.skin;
+  const jedi = JEDI_LOOK[a];
+  const body = jedi ? jedi.body : a === 'droid' ? metal : a === 'mystic' ? CLOAK : a === 'boss' ? '#121217' : color;
+  const pants = jedi
+    ? jedi.pants
+    : a === 'droid' ? sh(metal, -0.35) : a === 'engineer' ? sh(color, -0.35) : a === 'piet' ? '#f2d13d' : a === 'captain' ? '#1d2b4a' : sh(color, -0.45);
+  const skin = jedi?.skin ?? (a === 'alien' ? ALIEN_SKINS[Math.max(0, SKINS.indexOf(look.skin)) % ALIEN_SKINS.length] : a === 'droid' ? metal : look.skin);
   const hand = a === 'pilot' ? '#3a3f4c' : a === 'boss' ? '#2e3038' : a === 'droid' ? sh(metal, -0.2) : skin;
-  const robed = a === 'mystic' || a === 'sint' || a === 'boss';
+  const robed = a === 'mystic' || a === 'sint' || a === 'boss' || !!jedi?.robe;
   const sleeve = sh(body, -0.08);
 
   const yaw = YAW[dir];
@@ -126,6 +141,7 @@ function buildCharacter(look: Look, dir: Dir, drawFrame: Frame): Mesh {
   const HIP = 3.4;
   const drop = robed ? (frame ? 0.25 : 0) : HIP * (1 - Math.cos(swing));
   m.rotateZ(yaw);
+  if (a === 'yoda') m.scale(0.66); // small, with a big head (see the head section)
   if (a === 'astromech') {
     astromech(m, color, drawFrame);
     return m;
@@ -134,7 +150,7 @@ function buildCharacter(look: Look, dir: Dir, drawFrame: Frame): Mesh {
 
   // ---- legs (or robe) ----
   if (robed) {
-    const hem = a === 'sint' ? color : a === 'boss' ? '#0d0d11' : '#5a4632';
+    const hem = jedi?.robe ?? (a === 'sint' ? color : a === 'boss' ? '#0d0d11' : '#5a4632');
     for (const s of [-1, 1]) {
       const step = frame === 0 ? 0 : (s < 0) === (frame === 1) ? 0.7 : -0.5;
       const lift = step < 0 ? 0.25 : 0;
@@ -193,8 +209,9 @@ function buildCharacter(look: Look, dir: Dir, drawFrame: Frame): Mesh {
   const TRY = 0.74;
   /** Front surface (local y) of the torso at height z. */
   const tf = (z: number) => radiusAt(torso, z) * 0.924 * TRY;
-  const belt =
-    a === 'engineer' ? '#7a5230' : a === 'captain' ? '#1d2b4a' : a === 'sint' ? '#f4f6fa' : a === 'boss' ? '#8d939d' : a === 'mystic' ? color : sh(color, -0.4);
+  const belt = jedi
+    ? jedi.belt
+    : a === 'engineer' ? '#7a5230' : a === 'captain' ? '#1d2b4a' : a === 'sint' ? '#f4f6fa' : a === 'boss' ? '#8d939d' : a === 'mystic' ? color : sh(color, -0.4);
   m.lathe(0, 0, torso, 8, body, { ry: TRY, bands: [robed ? body : pants, belt, body, body, sh(body, 0.06)] });
   /** A small plate stuck on the torso front at height z (centre), x offset. */
   const chest = (x: number, z: number, w: number, h: number, c: string, o: { emissive?: boolean; d?: number } = {}) => {
@@ -228,6 +245,25 @@ function buildCharacter(look: Look, dir: Dir, drawFrame: Frame): Mesh {
       m.ball(0, 0.05, -2.85, 0.72, 0.72, 0.68, hand, { jitter: 0.02 });
     }
     m.pop();
+  }
+
+  // ---- Jedi: crossed tunic flaps and a lightsaber on the belt, glowing in the session colour ----
+  if (jedi) {
+    for (const s of [-1, 1]) {
+      m.hexa(
+        [[s * 0.1, tf(4.4) - 0.2, 4.3], [s * 1.9, tf(4.4) - 0.2, 4.3], [s * 1.9, tf(4.4) + 0.14, 4.3], [s * 0.1, tf(4.4) + 0.14, 4.3]],
+        [[-s * 1.3, tf(6.9) - 0.2, 6.95], [-s * 0.4, tf(6.9) - 0.2, 6.95], [-s * 0.4, tf(6.9) + 0.14, 6.95], [-s * 1.3, tf(6.9) + 0.14, 6.95]],
+        jedi.tabard,
+        { jitter: 0.02 },
+      );
+    }
+    const sabers = a === 'ahsoka' ? [-1, 1] : [1];
+    for (const s of sabers) {
+      const hx = s * (robed ? 2.75 : 2.45);
+      m.cylinder(hx, 0.35, 2.75, 0.3, 0.3, 1.45, 6, '#c9ced6', { jitter: 0.01 });
+      m.cylinder(hx, 0.35, 3.3, 0.33, 0.33, 0.3, 6, '#2a2d33', { jitter: 0 }); // grip
+      m.cylinder(hx, 0.35, 4.2, 0.24, 0.24, 0.22, 6, color, { emissive: true }); // emitter glow
+    }
   }
 
   // ---- shoulder / chest details ----
@@ -309,6 +345,12 @@ function buildCharacter(look: Look, dir: Dir, drawFrame: Frame): Mesh {
     prof = [[0, -1], [0.45, -0.88], [0.78, -0.45], [0.98, 0.1], [1.0, 0.55], [0.62, 0.9], [0, 1]];
   }
   if (a === 'pilot' || a === 'boss') R = 3.0;
+  if (a === 'yoda') {
+    // a big, wide head on a small body
+    R = 3.6;
+    RZ = 2.35;
+    prof = [[0, -1], [0.62, -0.86], [0.95, -0.4], [1.0, 0.05], [0.9, 0.5], [0.5, 0.88], [0, 1]];
+  }
   if (a === 'mystic') {
     R = 3.1;
     RZ = 2.3;
@@ -515,6 +557,71 @@ function buildCharacter(look: Look, dir: Dir, drawFrame: Frame): Mesh {
         m.cylinder(0, 0, -0.1, 0.3, 0.3, len + 0.2, 6, sh(gold, 0.08), sl);
         m.pop();
       }
+      break;
+    }
+    case 'ahsoka': {
+      // Togruta: orange skin with white facial markings, striped montrals and lekku
+      const white = '#f2f2ee';
+      const blue = '#2f5fc0';
+      skull(skin);
+      eyes(-0.12, '#1d3a6a', 0.55, 0.7, 0.42);
+      mouth(-0.62, '#9a3a2a');
+      stick(0, 0.42, 0.7, 0.55, white, { d: 0.32 }); // forehead mark
+      for (const s of [-1, 1]) {
+        stick(s * 0.42, 0.18, 0.55, 0.28, white, { d: 0.32, tilt: s * 0.4 }); // brows
+        stick(s * 0.62, -0.45, 0.5, 0.7, white, { d: 0.3 }); // cheek marks
+      }
+      stick(0, -0.85, 0.8, 0.35, white, { d: 0.3 }); // chin
+      // montrals: two striped horns curving up from the crown
+      for (const s of [-1, 1]) {
+        m.push().translate(s * 1.45, -0.3, hz + RZ * 0.55).rotateY(s * 0.3).rotateX(-0.2);
+        m.lathe(0, 0, [[0.85, 0], [0.75, 0.9], [0.68, 1.25], [0.5, 2.0], [0.3, 2.6], [0, 3.0]], 8, white, { bands: [white, blue, white, white, blue], ...at(s * 1.6, -0.3), jitter: 0.02 });
+        m.pop();
+      }
+      // lekku: two head-tails hanging beside the face over the shoulders, one longer down the back
+      const lek = (x: number, y: number, len: number, tip: number) => {
+        m.push().translate(x, y, hz - RZ * 0.3).rotateX(tip);
+        m.lathe(0, 0, [[0.2, -len], [0.45, -len * 0.7], [0.62, -len * 0.45], [0.7, -len * 0.2], [0.75, 0]], 7, white, { bands: [blue, white, blue, white], ...at(x, y), jitter: 0.02 });
+        m.pop();
+      };
+      for (const s of [-1, 1]) lek(s * 2.05, 0.05, 3.8, 0.2);
+      lek(0, -1.7, 4.4, -0.25);
+      break;
+    }
+    case 'yoda': {
+      // green, wrinkled, with long pointed ears and a few white wisps of hair
+      skull(skin, [sh(skin, -0.12), skin, skin, sh(skin, -0.05), skin, sh(skin, 0.04)]);
+      eyes(0.02, '#3a3424', 0.85, 0.75, 0.38);
+      for (const s of [-1, 1]) stick(s * 0.38, 0.22, 1.0, 0.25, sh(skin, -0.18), { d: 0.32 }); // heavy brows
+      mouth(-0.55, sh(skin, -0.4));
+      stick(0, -0.2, 0.45, 0.55, sh(skin, 0.06), { d: 0.42 }); // nose
+      for (const s of [-1, 1]) {
+        m.push().translate(s * R * 0.82, -0.15, hz + 0.2).rotateY(s * 1.25);
+        m.cylinder(0, 0, 0, 1.05, 0, 3.4, 5, skin, { ry: 0.38, ...at(s * 2.6, -0.2), jitter: 0.03 });
+        m.pop();
+      }
+      for (const [x, y, z] of [[-1.6, -0.8, 1.6], [1.7, -0.6, 1.5], [0.2, -1.6, 1.9]] as V3[])
+        m.ball(x, y, hz + z, 0.7, 0.6, 0.45, '#e9e6dc', { rough: 0.25, ...at(x, y) });
+      break;
+    }
+    case 'obiwan': {
+      // ginger hair and a neat beard
+      const ginger = '#8e5430';
+      skull(skin);
+      hair(ginger, -0.55);
+      eyes(-0.08, '#24324a');
+      m.ball(0, surf(-0.62, 0) - 0.5, hz - 1.5, 1.6, 1.0, 1.05, ginger, { layer: headLayer(0, 1), jitter: 0.05 }); // beard
+      stick(0, -0.38, 1.7, 0.38, sh(ginger, -0.08), { d: 0.42, out: 0.12, e: 0.05 }); // moustache
+      break;
+    }
+    case 'anakin': {
+      // shoulder-length brown hair, a scar over the right eye
+      const brown = '#5e4028';
+      skull(skin);
+      hair(brown, -0.95, undefined, 0.18);
+      eyes(-0.1, '#2a3a5a');
+      mouth(-0.62);
+      stick(-0.45, 0.05, 0.12, 0.9, sh(skin, -0.3), { d: 0.32 }); // scar
       break;
     }
     case 'engineer': {

@@ -17,7 +17,7 @@ import { hash, loadMap, type OfficeMap, type Tile } from './map';
 import { HOLIDAY_INFO, HolidayDecor, currentDate, currentHoliday, giftsUnderTree, santaHat, type DecorView, type Holiday } from './holidays';
 import { findPath } from './pathfinding';
 import { ARCHETYPES, CHAR_SCALE, SESSION_COLORS, SKINS, SPRITE_FEET, SPRITE_HEAD, SPRITE_UNITS, getSprite, type Dir, type Frame, type Look } from './sprites';
-import { MAX_RISE, RACK_LEDS, STRIP_PAD, WALL_IN, WALL_RISE, renderLayers, windowGlass, type MapLayers } from './tiles';
+import { DOOR_BOX, DOOR_STEPS, MAX_RISE, RACK_LEDS, STRIP_PAD, WALL_IN, WALL_RISE, doorImage, renderLayers, windowGlass, type MapLayers } from './tiles';
 import { JUKE_BANDS, JUKE_RECORD } from './furniture';
 import { ART_RES, poly, shade, softShadow, type Pt } from './lowpoly';
 import { ISO_MATRIX, ISO_ZSCALE, Mesh, SKEW, ZK, iso, isoOf, unIso, type V3 } from './mesh';
@@ -258,7 +258,15 @@ export interface Worker {
   waking?: boolean;
   /** The name before any nickname you gave them. */
   baseName?: string;
+  /**
+   * Fetching a new task from the Manager: they finish the walk to his desk and stand there for a moment
+   * before following the session to its next room (`pendingRoom`). `briefedAt` is when they arrived.
+   */
+  errand?: { pendingRoom?: RoomId; briefedAt?: number };
 }
+
+/** How long a worker stands at the Manager's desk to get their new task before heading off. */
+const BRIEFING_MS = 2200;
 
 /** What's under the pointer. Worker ids: session id for the main worker, `${sessionId}:${agentId}` for helpers. */
 export type Pick = { kind: 'worker'; sessionId: string; workerId: string } | { kind: 'room'; roomId: RoomId } | null;
@@ -295,6 +303,9 @@ export class OfficeRenderer {
   private readonly layers: MapLayers;
   private readonly ctx: CanvasRenderingContext2D;
   private workers = new Map<string, Worker>();
+  /** Sliding doors, by row: how far open each one is (0 = shut, 1 = open). */
+  private doors = new Map<number, Array<{ x: number; y: number; open: number }>>();
+  private doorClock = 0;
   /** "x,y" -> worker id */
   private occupied = new Map<string, string>();
   private raf = 0;
@@ -362,6 +373,11 @@ export class OfficeRenderer {
     this.layers = renderLayers(this.map);
     this.ctx = canvas.getContext('2d')!;
     this.animated = this.findAnimatedTiles();
+    for (let y = 0; y < this.map.h; y++)
+      for (let x = 0; x < this.map.w; x++) {
+        const c = this.map.at(x, y);
+        if (c === 'D' || c === 'E') this.doors.set(y, [...(this.doors.get(y) ?? []), { x, y, open: 0 }]);
+      }
     const h = new URLSearchParams(location.search).get('hour');
     this.hourOverride = h !== null && !Number.isNaN(Number(h)) ? Number(h) : null;
     [this.cx, this.cy] = this.homeCenter();
@@ -848,15 +864,25 @@ export class OfficeRenderer {
       };
       this.workers.set(id, w);
       this.walkTo(w, spot);
-    } else if (w.room !== room) {
-      this.releaseSpot(w);
-      w.room = room;
-      w.spot = this.claimSpot(id, room);
-      this.walkTo(w, w.spot);
-      if (room === BOSS_ROOM && !isSub) {
-        if (action === REPORT_ACTION) this.bossReceives(name);
-        else if (status === 'waiting') this.bossSays(`${name} has a question for you. Come to my desk.`);
-        else this.bossAssigns(name);
+      if (room === BOSS_ROOM && !isSub && this.synced && status === 'working' && action !== REPORT_ACTION) {
+        w.errand = {};
+        this.bossAssigns(name);
+      }
+    } else if (w.errand && room !== BOSS_ROOM) {
+      // still on the way to (or at) the Manager's desk: go there next, once briefed
+      w.errand.pendingRoom = room;
+    } else if (w.room !== room || (w.errand && w.errand.pendingRoom)) {
+      if (w.errand) w.errand.pendingRoom = undefined;
+      if (w.room !== room) {
+        this.moveTo(w, room);
+        if (room === BOSS_ROOM && !isSub) {
+          if (action === REPORT_ACTION) this.bossReceives(name);
+          else if (status === 'waiting') this.bossSays(`${name} has a question for you. Come to my desk.`);
+          else {
+            w.errand = {};
+            this.bossAssigns(name);
+          }
+        }
       }
     }
     if (w.action !== action || w.status !== status) w.actionAt = now;
@@ -866,8 +892,31 @@ export class OfficeRenderer {
     return w;
   }
 
+  /** Walk a worker to a free spot in another room. */
+  private moveTo(w: Worker, room: RoomId) {
+    this.releaseSpot(w);
+    w.room = room;
+    w.spot = this.claimSpot(w.id, room);
+    this.walkTo(w, w.spot);
+  }
+
+  /** Errands: once at the Manager's desk, wait BRIEFING_MS, then head for the session's current room. */
+  private tickErrand(w: Worker, now: number) {
+    const e = w.errand;
+    if (!e || w.leaving) return;
+    if (w.path.length) return;
+    if (e.briefedAt === undefined) {
+      e.briefedAt = now;
+      return;
+    }
+    if (now - e.briefedAt < BRIEFING_MS) return;
+    w.errand = undefined;
+    if (e.pendingRoom && e.pendingRoom !== w.room) this.moveTo(w, e.pendingRoom);
+  }
+
   /** Worker is gone from the server: walk to the exit (subagents: back to the meeting room) and vanish. */
   private sendOff(w: Worker) {
+    w.errand = undefined;
     this.releaseSpot(w);
     w.leaving = true;
     w.status = 'resting';
@@ -906,7 +955,10 @@ export class OfficeRenderer {
       return undefined;
     };
     const seats = this.map.seats[room];
+    // in the Manager's office you come to stand in front of his desk, nearest him first
+    const front = room === BOSS_ROOM ? this.deskFront() : [];
     const spot =
+      (front.length ? free(front, 0) : undefined) ??
       (seats.length ? free(seats, hash(id, room, 'seat') % seats.length) : undefined) ??
       free(spots, start) ??
       free(this.map.overflow[room], start) ??
@@ -914,6 +966,20 @@ export class OfficeRenderer {
     this.occupied.set(`${spot[0]},${spot[1]}`, id);
     return spot;
   }
+
+  /** Floor tiles right in front of (below) the Manager's desk, nearest his seat first. */
+  private deskFront(): Tile[] {
+    if (this.deskFrontCache) return this.deskFrontCache;
+    const [x0, y0, x1, y1] = this.map.rooms[BOSS_ROOM].rect;
+    const bx = this.bossSeat?.[0] ?? (x0 + x1) / 2;
+    const out: Tile[] = [];
+    for (let y = y0 + 1; y < y1; y++)
+      for (let x = x0 + 1; x < x1; x++) if (this.map.at(x, y) === '.' && this.map.at(x, y - 1) === 'R') out.push([x, y]);
+    out.sort((a, b) => Math.abs(a[0] - bx) - Math.abs(b[0] - bx) || a[0] - b[0]);
+    this.deskFrontCache = out;
+    return out;
+  }
+  private deskFrontCache: Tile[] | null = null;
 
   private releaseSpot(w: Worker) {
     const k = `${w.spot[0]},${w.spot[1]}`;
@@ -952,6 +1018,7 @@ export class OfficeRenderer {
         // Turn to face you while being poked, otherwise face your furniture (the manager faces his visitors).
         w.dir = this.pokes.has(w.id) ? 'down' : w.id === BOSS_ID ? this.bossDir : this.restingDir(w);
       }
+      this.tickErrand(w, performance.now());
     }
     const now = performance.now();
     for (const [id, t0] of this.pokes) if (now - t0 > POKE_MS * 2) this.pokes.delete(id);
@@ -1315,9 +1382,11 @@ export class OfficeRenderer {
       const row = Math.max(0, Math.min(map.h - 1, Math.floor(w.y + FOOT_Y + 1e-6)));
       byRow.set(row, [...(byRow.get(row) ?? []), w]);
     }
+    this.updateDoors(t, sorted);
     for (let y = 0; y < map.h; y++) {
       this.planMode();
       ctx.drawImage(this.layers.strips[y], -STRIP_PAD * s, this.py(y) - MAX_RISE * s, (STRIP_PAD + map.w * T) * s, (T + MAX_RISE) * s);
+      this.drawDoorsRow(y);
       this.drawAnimatedRow(y, t);
       this.planMode();
       this.decor.drawRow(this.holiday, y, view, t);
@@ -2099,6 +2168,40 @@ export class OfficeRenderer {
   }
 
   /** Blinking rack LEDs and hologram shimmer for objects based in row `row` (plan mode). */
+  /** Doors slide open when someone comes close (within DOOR_REACH tiles) and close again behind them. */
+  private updateDoors(t: number, workers: Worker[]) {
+    const dt = this.doorClock ? Math.min(0.1, Math.max(0, (t - this.doorClock) / 1000)) : 0;
+    this.doorClock = t;
+    const DOOR_REACH = 1.6;
+    for (const row of this.doors.values())
+      for (const d of row) {
+        const near = workers.some((w) => Math.hypot(w.x - d.x, w.y - d.y) < DOOR_REACH);
+        // opens quickly (0.25 s), closes a little slower (0.45 s)
+        d.open = near ? Math.min(1, d.open + dt * 4) : Math.max(0, d.open - dt * 2.2);
+      }
+    // the two tiles of a wide doorway are one door: they open and close together
+    const at = (x: number, y: number) => this.doors.get(y)?.find((d) => d.x === x);
+    for (const row of this.doors.values())
+      for (const d of row)
+        for (const n of [at(d.x + 1, d.y), at(d.x, d.y + 1)]) {
+          if (!n) continue;
+          const o = Math.max(d.open, n.open);
+          d.open = o;
+          n.open = o;
+        }
+  }
+
+  private drawDoorsRow(row: number) {
+    const doors = this.doors.get(row);
+    if (!doors) return;
+    const { ctx, scale: s } = this;
+    this.planMode();
+    for (const d of doors) {
+      const img = doorImage(this.map, d.x, d.y, Math.round(d.open * DOOR_STEPS));
+      ctx.drawImage(img, this.px(d.x) + DOOR_BOX.x * s, this.py(d.y) + DOOR_BOX.y * s, DOOR_BOX.w * s, DOOR_BOX.h * s);
+    }
+  }
+
   private drawAnimatedRow(row: number, t: number) {
     const { ctx, scale: s } = this;
     this.planMode();

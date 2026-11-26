@@ -736,6 +736,91 @@ function drawDoorFloor(ctx: Ctx, map: OfficeMap, x: number, y: number, entrance:
   }
 }
 
+// ---------------- sliding doors (animated by the renderer) ----------------
+
+/** Does a door tile let people pass north-south (it sits in a horizontal wall)? Same rule as its floor. */
+export function doorRunsNS(map: OfficeMap, x: number, y: number) {
+  const blocked = (c: string) => isSolid(c) || isDoor(c);
+  return blocked(map.at(x - 1, y)) || blocked(map.at(x + 1, y)) || !(blocked(map.at(x, y - 1)) || blocked(map.at(x, y + 1)));
+}
+
+/** Steps of the door animation that get their own baked image (0 = shut, DOOR_STEPS = fully open). */
+export const DOOR_STEPS = 12;
+/** Tile-local plan-space box each baked door image covers (it leans up and left with height). */
+export const DOOR_BOX = { x: -8, y: -16, w: 28, h: 34 } as const;
+const doorCache = new Map<string, HTMLCanvasElement>();
+
+/**
+ * A pair of sliding door panels in a doorway, `step` of DOOR_STEPS open: each panel slides into its side
+ * of the wall, so the opening widens from the middle. Baked once per (orientation, kind, step) in plan
+ * space, covering DOOR_BOX of the tile; draw it at the tile's plan position through the camera transform.
+ */
+export function doorImage(map: OfficeMap, x: number, y: number, step: number): HTMLCanvasElement {
+  const ns = doorRunsNS(map, x, y);
+  const entrance = map.at(x, y) === 'E';
+  // a doorway two tiles wide is one door: each tile holds one panel that slides away from the other tile
+  const along = (d: number) => (ns ? map.at(x + d, y) : map.at(x, y + d));
+  const pairLo = isDoor(along(-1)); // the doorway continues on the u = 0 side
+  const pairHi = isDoor(along(1)); // ... on the u = 16 side
+  const mode = pairLo === pairHi ? 'both' : pairHi ? 'lo' : 'hi'; // which side(s) the panels hide in
+  const key = `${ns ? 1 : 0}${entrance ? 1 : 0}${mode}:${step}`;
+  let c = doorCache.get(key);
+  if (c) return c;
+  c = document.createElement('canvas');
+  c.width = DOOR_BOX.w * ART_RES;
+  c.height = DOOR_BOX.h * ART_RES;
+  const ctx = c.getContext('2d')!;
+  ctx.scale(ART_RES, ART_RES);
+  ctx.translate(-DOOR_BOX.x, -DOOR_BOX.y);
+
+  const open = step / DOOR_STEPS;
+  const ease = open * open * (3 - 2 * open);
+  const m = new Mesh(entrance ? 71 : 70);
+  // the layout is written for a door in a horizontal wall (panels slide along x); swap for the other way
+  const P = (u: number, v: number): [number, number] => (ns ? [u, v] : [v, u]);
+  const panel = entrance ? '#4f5a56' : '#4b5060';
+  const light = ease > 0.05 ? '#58e07a' : '#ff5a4a';
+  const v0 = WALL_IN + 1.1;
+  const v1 = 16 - WALL_IN - 1.1;
+  const H = WALL_RISE - 0.9;
+  const half = mode === 'both' ? 8 - 0.08 : 16 - 0.08;
+  const w = half * (1 - ease) + 0.6 * ease; // a lip stays visible at each jamb when fully open
+  const sides = mode === 'both' ? [-1, 1] : mode === 'lo' ? [-1] : [1];
+  const slab = (u0: number, u1: number, z0: number, z1: number, col: string, o: { emissive?: boolean; dv?: number; layer?: number } = {}) => {
+    const dv = o.dv ?? 0;
+    const [ax, ay] = P(u0, v0 - dv);
+    const [bx, by] = P(u1, v1 + dv);
+    m.box(Math.min(ax, bx), Math.min(ay, by), z0, Math.abs(bx - ax), Math.abs(by - ay), z1 - z0, col, {
+      emissive: o.emissive,
+      bevel: o.emissive || o.layer ? 0 : 0.3,
+      bevelH: 0.25,
+      jitter: 0.01,
+      layer: o.layer ?? 0,
+    });
+  };
+  for (const side of sides) {
+    // u runs along the wall; the left panel hugs u = 0, the right one u = 16
+    const u0 = side < 0 ? 0 : 16 - w;
+    const u1 = side < 0 ? w : 16;
+    slab(u0, u1, 0, H, panel);
+    // a window slit and the hazard edge on the meeting side
+    const edge = side < 0 ? u1 - 0.7 : u0;
+    if (w > 1.4) {
+      slab(edge, edge + 0.7, 0.4, H - 0.4, '#d9a53a', { dv: 0.06, layer: 1 });
+      const wa = side < 0 ? Math.max(u0 + 0.8, u1 - 4.2) : u0 + 1.2;
+      const wb = side < 0 ? u1 - 1.2 : Math.min(u1 - 0.8, u0 + 4.2);
+      if (wb - wa > 0.6) slab(wa, wb, 6.2, 9.0, '#16202c', { dv: 0.05, layer: 1 });
+    }
+  }
+  // the status light over the middle of the doorway: red when shut, green while open
+  if (mode === 'both') slab(6.6, 9.4, H + 0.05, H + 0.55, light, { emissive: true, dv: -0.4, layer: 2 });
+  else if (mode === 'lo') slab(14.6, 16, H + 0.05, H + 0.55, light, { emissive: true, dv: -0.4, layer: 2 });
+  else slab(0, 1.4, H + 0.05, H + 0.55, light, { emissive: true, dv: -0.4, layer: 2 });
+  m.draw(ctx);
+  doorCache.set(key, c);
+  return c;
+}
+
 /** Light comes from the top-left: shadows fall down and to the right. */
 function drawFloorShading(ctx: Ctx, map: OfficeMap, x: number, y: number) {
   const c = map.at(x, y);
