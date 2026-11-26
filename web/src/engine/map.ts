@@ -29,7 +29,7 @@ export interface OfficeMap {
   roomAt(x: number, y: number): RoomId | undefined;
 }
 
-const FURNITURE_FREE = new Set(['.', 'D', 'E', '#', 'V']);
+const FURNITURE_FREE = new Set(['.', 'D', 'E', 'X', '#', 'V']);
 /** Furniture tall enough to hide someone standing just north of it. */
 const TALL = new Set(['B', 'S', 'M', 'K', 'F', 'J', 'W', 'A', 'R', '#', 'V']); // walls rise too
 
@@ -70,7 +70,7 @@ export function loadMap(): OfficeMap {
     for (let dy = -1; dy <= 1; dy++)
       for (let dx = -1; dx <= 1; dx++) {
         const c = at(x + dx, y + dy);
-        if (c === 'D' || c === 'E') return true;
+        if (c === 'D' || c === 'E' || c === 'X') return true;
       }
     return false;
   };

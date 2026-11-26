@@ -44,7 +44,9 @@ export interface MapLayers {
 
 const isWallish = (c: string) => c === '#' || c === 'V';
 const isDoor = (c: string) => c === 'D' || c === 'E';
-const isObject = (c: string) => !'.DE'.includes(c);
+/** Secret door: a walkable gap disguised as a wall panel (no hazard stripes). */
+const isSecret = (c: string) => c === 'X';
+const isObject = (c: string) => !'.DEX'.includes(c);
 
 export function renderLayers(map: OfficeMap): MapLayers {
   const T = map.tileSize;
@@ -60,6 +62,7 @@ export function renderLayers(map: OfficeMap): MapLayers {
       fctx.translate(x * T, y * T);
       const c = map.at(x, y);
       if (isDoor(c)) drawDoorFloor(fctx, map, x, y, c === 'E');
+      else if (isSecret(c)) drawSecretDoorFloor(fctx);
       else drawFloor(fctx, map, x, y);
       fctx.restore();
     }
@@ -190,6 +193,20 @@ function drawDoorFloor(ctx: Ctx, map: OfficeMap, x: number, y: number, entrance:
     r(ctx, 1, 1, 2, 2, '#58e07a');
     r(ctx, 1, 13, 2, 2, '#58e07a');
   }
+}
+
+/** A wall panel slid aside: bulkhead-coloured plating with a dark passage seam and a faint glyph. */
+function drawSecretDoorFloor(ctx: Ctx) {
+  r(ctx, 0, 0, 16, 16, '#2d2f35');
+  r(ctx, 0, 0, 3, 16, '#3d3f46'); // panel edge, slid into the left jamb
+  r(ctx, 3, 0, 1, 16, '#1b1c20');
+  r(ctx, 5, 0, 7, 16, '#1f2025'); // the passage
+  r(ctx, 6, 0, 5, 16, '#17181c');
+  r(ctx, 13, 0, 3, 16, '#3d3f46');
+  r(ctx, 12, 0, 1, 16, '#1b1c20');
+  r(ctx, 14, 6, 1, 1, '#b07cff'); // tiny glowing glyph only people in the know notice
+  r(ctx, 14, 8, 1, 1, '#b07cff');
+  r(ctx, 14, 7, 1, 1, 'rgba(176,124,255,0.4)');
 }
 
 /** Light comes from the top-left: shadows fall down and to the right. */
